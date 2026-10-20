@@ -1625,6 +1625,7 @@ impl App for Notas {
             Msg::Maximizar => return Task::window(WindowCmd::ToggleMaximize),
             Msg::Pedido(p) => match p.as_str() {
                 "postit" => return self.update(Msg::NovoPostIt),
+                "trocar" => return self.update(Msg::Sair),
                 _ if p.starts_with("abrir\0") => {
                     let _ = self.update(Msg::Abertos(p.split('\0').skip(1).map(PathBuf::from).collect()));
                     return self.update(Msg::MostrarPrincipal);

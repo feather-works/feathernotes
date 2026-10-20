@@ -26,8 +26,20 @@ pub fn iniciar(pedido: &str) -> Inicio {
             // a porta velha pode ser de outro programa agora, que nem responde nem fecha.
             let _ = s.set_read_timeout(Some(Duration::from_millis(300)));
             let mut resposta = String::new();
-            if writeln!(s, "{PREFIXO}{pedido}").is_ok() && BufReader::new(s).read_line(&mut resposta).is_ok_and(|n| n == 0 || resposta.trim() == "ok") {
-                return Inicio::Entregue;
+            if writeln!(s, "{PREFIXO}{pedido}").is_ok() {
+                match BufReader::new(s).read_line(&mut resposta) {
+                    Ok(n) if n == 0 || resposta.trim() == "ok" => return Inicio::Entregue,
+                    // O aberto é de antes de uma atualização: ele guarda a sessão e sai; esperamos a porta soltar.
+                    Ok(_) if resposta.trim() == "trocar" => {
+                        for _ in 0..50 {
+                            if TcpStream::connect_timeout(&endereco, Duration::from_millis(100)).is_err() {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -49,7 +61,8 @@ pub fn pedidos(l: TcpListener) -> impl futures::Stream<Item = String> + Send {
             let mut linha = String::new();
             if BufReader::new(&s).take(64 * 1024).read_line(&mut linha).is_ok() {
                 if let Some(p) = linha.trim().strip_prefix(PREFIXO) {
-                    let _ = writeln!(&s, "ok");
+                    let p = if substituido() { "trocar" } else { p };
+                    let _ = writeln!(&s, "{}", if p == "trocar" { "trocar" } else { "ok" });
                     if futures::executor::block_on(futures::SinkExt::send(&mut envia, p.to_owned())).is_err() {
                         return;
                     }
@@ -58,6 +71,12 @@ pub fn pedidos(l: TcpListener) -> impl futures::Stream<Item = String> + Send {
         }
     });
     recebe
+}
+
+/// A atualização trocou o executável no disco (o Linux marca o antigo como apagado): este
+/// processo é a versão velha e deve dar lugar à nova.
+fn substituido() -> bool {
+    std::fs::read_link("/proc/self/exe").is_ok_and(|e| e.to_string_lossy().ends_with(" (deleted)"))
 }
 
 #[cfg(test)]
@@ -98,5 +117,15 @@ mod testes {
         let mut fluxo = Box::pin(pedidos(l));
         assert!(matches!(iniciar("mostrar"), Inicio::Entregue));
         assert_eq!(futures::executor::block_on(futures::StreamExt::next(&mut fluxo)), Some("mostrar".to_string()));
+        // O aberto é de antes de uma atualização: responde "trocar" e sai; o novo vira o primeiro.
+        let velho = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        crate::arquivo::gravar(&arquivo, velho.local_addr().unwrap().port().to_string().as_bytes()).unwrap();
+        let sai = std::thread::spawn(move || {
+            let (s, _) = velho.accept().unwrap();
+            BufReader::new(&s).read_line(&mut String::new()).unwrap();
+            writeln!(&s, "trocar").unwrap();
+        });
+        assert!(matches!(iniciar("mostrar"), Inicio::Primeiro(Some(_))));
+        sai.join().unwrap();
     }
 }
