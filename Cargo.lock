@@ -2110,8 +2110,8 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pelicano"
-version = "0.1.4"
-source = "git+https://github.com/feather-works/pelicano?tag=v0.1.4#3abe90b05ad64ce80b2603f9543b0acfc615bfba"
+version = "0.1.5"
+source = "git+https://github.com/feather-works/pelicano?tag=v0.1.5#c76103be59dd9d8f44e8652d8563c4e923da97cd"
 dependencies = [
  "cosmic-text",
  "futures",

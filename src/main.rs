@@ -37,8 +37,6 @@ fn janela_principal(escondida: bool) -> Settings {
         // O × fecha só a janela: os post-its continuam e o app segue até o "Sair".
         run_in_background: true,
         start_hidden: escondida,
-        // No X11 os post-its lembram o lugar, prendem no fundo e ficam fora da dock; o Wayland não deixa nada disso.
-        x11: true,
         ..Default::default()
     }
 }
