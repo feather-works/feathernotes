@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 pub fn gravar(p: &Path, bytes: &[u8]) -> io::Result<()> {
     let nome = p.file_name().ok_or_else(|| io::Error::other("caminho sem nome de arquivo"))?;
     let tmp = p.with_file_name(format!(".{}.feathernotes", nome.to_string_lossy()));
-    std::fs::write(&tmp, bytes)?;
+    let mut f = std::fs::File::create(&tmp)?;
+    io::Write::write_all(&mut f, bytes)?;
+    // Para o disco antes de trocar: sem isso, no XFS a queda pode deixar o arquivo vazio.
+    f.sync_all()?;
     std::fs::rename(&tmp, p)
 }
 
@@ -33,6 +36,8 @@ pub struct AbaSalva {
     pub id: u64,
     pub caminho: Option<PathBuf>,
     pub markdown: bool,
+    /// A de salvar; `None` nas sessões antigas (aí detecta pelo arquivo).
+    pub cod: Option<crate::codificacao::Cod>,
 }
 
 // shortcut: uma aba por linha separada por tab; um caminho com tab ou quebra de linha no nome se perde na sessão.
@@ -42,6 +47,9 @@ pub fn gravar_sessao(ativa: usize, abas: &[AbaSalva]) -> io::Result<()> {
         s.push_str(&format!("aba\t{}\t{}\n", a.id, a.caminho.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned())));
         if a.markdown {
             s.push_str(&format!("md\t{}\n", a.id));
+        }
+        if let Some(c) = a.cod {
+            s.push_str(&format!("cod\t{}\t{}\n", a.id, c.nome()));
         }
     }
     let pasta = pasta_dados();
@@ -59,13 +67,18 @@ pub fn ler_sessao() -> (usize, Vec<AbaSalva>) {
             ["ativa", n] => ativa = n.parse().unwrap_or(0),
             ["aba", id, caminho] => {
                 if let Ok(id) = id.parse() {
-                    abas.push(AbaSalva { id, caminho: (!caminho.is_empty()).then(|| PathBuf::from(caminho)), markdown: false });
+                    abas.push(AbaSalva { id, caminho: (!caminho.is_empty()).then(|| PathBuf::from(caminho)), markdown: false, cod: None });
                 }
             }
             // Numa linha à parte: sessões antigas, sem ela, continuam lendo.
             ["md", id] => {
                 if let Some(a) = abas.iter_mut().find(|a| id.parse() == Ok(a.id)) {
                     a.markdown = true;
+                }
+            }
+            ["cod", id, nome] => {
+                if let Some(a) = abas.iter_mut().find(|a| id.parse() == Ok(a.id)) {
+                    a.cod = crate::codificacao::pelo_nome(nome);
                 }
             }
             _ => {}
@@ -308,6 +321,28 @@ mod testes {
         assert_eq!(trocar_na_lista(&dois, true), dois);
         assert_eq!(trocar_na_lista(&dois, false), format!("['{c0}']"));
         assert_eq!(texto_gvariant("\"/a b/it's\" --postit"), "'\"/a b/it\\'s\" --postit'");
+    }
+
+    /// Ida e volta da sessão: o que foi gravado volta, e a cópia de uma aba da sessão não é apagada.
+    #[test]
+    fn sessao_volta_e_guarda_a_copia() {
+        use crate::codificacao::Cod;
+        let abas = [
+            AbaSalva { id: 9001, caminho: Some("/tmp/a b.md".into()), markdown: true, cod: Some(Cod::Legado("windows-1252")) },
+            AbaSalva { id: 9002, caminho: None, markdown: false, cod: None },
+        ];
+        gravar_sessao(1, &abas).unwrap();
+        gravar(&recuperacao(9001), b"nao salvo").unwrap();
+        let orfa = recuperacao(9999);
+        gravar(&orfa, b"de ninguem").unwrap();
+        let (ativa, lidas) = ler_sessao();
+        assert_eq!(ativa, 1);
+        let a = lidas.iter().find(|a| a.id == 9001).unwrap();
+        assert_eq!((a.caminho.as_deref(), a.markdown, a.cod), (Some(Path::new("/tmp/a b.md")), true, Some(Cod::Legado("windows-1252"))));
+        let b = lidas.iter().find(|a| a.id == 9002).unwrap();
+        assert_eq!((b.caminho.as_deref(), b.markdown, b.cod), (None, false, None));
+        assert!(recuperacao(9001).exists(), "a cópia de uma aba da sessão fica");
+        assert!(!orfa.exists(), "a de ninguém vai embora");
     }
 }
 

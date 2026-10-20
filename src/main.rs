@@ -57,9 +57,12 @@ fn main() -> Result<(), Error> {
         if n.inicio_sistema {
             let _ = arquivo::iniciar_com_sistema(true);
         }
+        // Instalado pelo .deb (em /usr) o pacote já pôs no menu; a cópia do usuário ficaria para trás no `apt remove`.
         #[cfg(target_os = "linux")]
-        if let Err(e) = arquivo::registrar_no_sistema(&include_str!("../assets/pena.svg").replace("#287846", COR_APP).replace("#72aa86", "#7fb0f0")) {
-            n.aviso = Some(format!("Não deu para pôr o FeatherNotes no menu de aplicativos: {e}"));
+        if !std::env::current_exe().is_ok_and(|e| e.starts_with("/usr/")) {
+            if let Err(e) = arquivo::registrar_no_sistema(&pena_svg()) {
+                n.aviso = Some(format!("Não deu para pôr o FeatherNotes no menu de aplicativos: {e}"));
+            }
         }
         let pedidos = porta.map(|l| Task::run(instancia::pedidos(l), Msg::Pedido));
         let novo = postit.then(|| Task::done(Msg::NovoPostIt));
@@ -83,6 +86,8 @@ struct Aba {
     /// A versão já copiada para a recuperação.
     copiado: u64,
     cod: Cod,
+    /// A da sessão anterior, para a cópia de recuperação (o arquivo pode estar noutra).
+    cod_salva: Option<Cod>,
     /// A quebra da primeira linha do arquivo (lida ao abrir) ou a escolhida para salvar.
     quebra: Quebra,
     /// Abriu com acentos quebrados ("JoÃ£o"): o rodapé oferece o conserto.
@@ -96,7 +101,7 @@ struct Aba {
 impl Aba {
     fn nova(id: u64, caminho: Option<PathBuf>) -> Self {
         let markdown = caminho.as_deref().is_some_and(eh_markdown);
-        Aba { id, caminho, conteudo: None, salvo: Some(0), copiado: 0, cod: Cod::Utf8, quebra: Quebra::Lf, acentos_quebrados: false, converter: false, markdown }
+        Aba { id, caminho, conteudo: None, salvo: Some(0), copiado: 0, cod: Cod::Utf8, cod_salva: None, quebra: Quebra::Lf, acentos_quebrados: false, converter: false, markdown }
     }
     fn nome(&self) -> String {
         self.caminho.as_ref().and_then(|p| p.file_name()).map_or(SEM_TITULO.into(), |n| n.to_string_lossy().into_owned())
@@ -316,7 +321,7 @@ impl Notas {
     fn novo() -> Self {
         let prefs = arquivo::ler_preferencias();
         let (ativa, salvas) = arquivo::ler_sessao();
-        let mut abas: Vec<Aba> = salvas.into_iter().map(|AbaSalva { id, caminho, markdown }| Aba { markdown: markdown || caminho.as_deref().is_some_and(eh_markdown), ..Aba::nova(id, caminho) }).collect();
+        let mut abas: Vec<Aba> = salvas.into_iter().map(|AbaSalva { id, caminho, markdown, cod }| Aba { markdown: markdown || caminho.as_deref().is_some_and(eh_markdown), cod_salva: cod, ..Aba::nova(id, caminho) }).collect();
         let proximo_id = abas.iter().map(|a| a.id + 1).max().unwrap_or(1);
         if abas.is_empty() {
             abas.push(Aba::nova(proximo_id, None));
@@ -334,12 +339,16 @@ impl Notas {
         if aba.conteudo.is_some() {
             return;
         }
+        // Todo texto novo começa na versão 0: a contagem guardada pode ser da aba que estava no lugar.
+        self.estatisticas.take();
+        self.ocultos.take();
         let copia = arquivo::recuperacao(aba.id);
         let original = aba.caminho.as_ref().map(std::fs::read);
         let (texto, salvo) = if let Ok(bytes) = std::fs::read(&copia) {
             // A cópia é sempre UTF-8; a codificação para salvar vem do arquivo original.
-            aba.cod = match &original {
-                Some(Ok(b)) => codificacao::detectar(b),
+            aba.cod = match (aba.cod_salva, &original) {
+                (Some(c), _) => c,
+                (None, Some(Ok(b))) => codificacao::detectar(b),
                 _ => Cod::Utf8,
             };
             (String::from_utf8_lossy(&bytes).into_owned(), None)
@@ -355,7 +364,8 @@ impl Notas {
                 }
                 Some(Err(e)) => {
                     self.aviso = Some(format!("Não abriu {}: {e}", aba.caminho.as_ref().expect("tem caminho").display()));
-                    (String::new(), None)
+                    // Não alterada: o vazio não vai para a recuperação nem por cima do arquivo, e a próxima vez tenta de novo.
+                    (String::new(), Some(0))
                 }
                 None => (String::new(), Some(0)),
             }
@@ -413,7 +423,7 @@ impl Notas {
             }
         }
         self.guardar_postits();
-        let lista: Vec<AbaSalva> = self.abas.iter().map(|a| AbaSalva { id: a.id, caminho: a.caminho.clone(), markdown: a.markdown }).collect();
+        let lista: Vec<AbaSalva> = self.abas.iter().map(|a| AbaSalva { id: a.id, caminho: a.caminho.clone(), markdown: a.markdown, cod: a.conteudo.as_ref().map_or(a.cod_salva, |_| Some(a.cod)) }).collect();
         if let Err(e) = arquivo::gravar_sessao(self.ativa, &lista) {
             self.aviso = Some(format!("Não guardou a sessão: {e}"));
         }
@@ -678,6 +688,8 @@ impl Notas {
                 aba.conteudo = Some(Content::with_text(&texto));
                 aba.salvo = Some(0);
                 aba.converter = false;
+                self.estatisticas.take();
+                self.ocultos.take();
                 self.aviso = ruim.then(|| format!("Alguns bytes não fazem sentido em {}: viraram �", cod.nome()));
             }
             Err(e) => self.aviso = Some(format!("Não abriu: {e}")),
@@ -783,10 +795,15 @@ fn traco(caminho: &'static str, tamanho: f32, cor: Color) -> SvgView {
     svg(s).width(tamanho).height(tamanho).color(cor)
 }
 
+/// O SVG da marca nas cores do FeatherNotes (o mesmo vai para o menu de aplicativos).
+fn pena_svg() -> String {
+    include_str!("../assets/pena.svg").replace("#287846", COR_APP).replace("#72aa86", "#7fb0f0")
+}
+
 /// A pena da marca em azul, sem o quadrado de fundo.
 fn pena(tamanho: f32) -> SvgView {
     let s = svg_cache("pena", || {
-        let mut p = include_str!("../assets/pena.svg").replace("#287846", COR_APP).replace("#72aa86", "#7fb0f0");
+        let mut p = pena_svg();
         if let Some(i) = p.find("<rect id=\"fundo-arredondado\"") {
             let fim = p[i..].find("/>").map_or(i, |f| i + f + 2);
             p.replace_range(i..fim, "");

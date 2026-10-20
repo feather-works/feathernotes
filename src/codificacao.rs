@@ -136,9 +136,8 @@ impl Cod {
     /// Os bytes do texto, ou os caracteres que não cabem nesta codificação (nada é trocado em silêncio).
     pub fn gravar(self, texto: &str) -> Result<Vec<u8>, Vec<char>> {
         let faltam = |cabe: &dyn Fn(char) -> bool| {
-            let mut f: Vec<char> = texto.chars().filter(|&c| !cabe(c)).collect();
-            f.dedup();
-            f
+            let mut visto = std::collections::HashSet::new();
+            texto.chars().filter(|&c| !cabe(c) && visto.insert(c)).collect::<Vec<char>>()
         };
         let ok_ou = |bytes: Vec<u8>, f: Vec<char>| if f.is_empty() { Ok(bytes) } else { Err(f) };
         match self {
@@ -165,6 +164,11 @@ impl Cod {
             }
         }
     }
+}
+
+/// O contrário de `nome()`: a que a sessão guardou.
+pub fn pelo_nome(nome: &str) -> Option<Cod> {
+    PRINCIPAIS.iter().chain(OUTRAS).copied().find(|c| c.nome() == nome)
 }
 
 /// O palpite pela marca no começo (BOM), depois UTF-8 válido, depois o `chardetng`.
