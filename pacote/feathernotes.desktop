@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=FeatherNotes
+GenericName=Bloco de notas
+Comment=Bloco de notas e post-its da suíte FeatherWorks
+Exec=feathernotes
+Icon=feathernotes
+Terminal=false
+Categories=Utility;TextEditor;
+Keywords=notas;texto;markdown;post-it;lembrete;
+StartupWMClass=feathernotes
+Actions=postit;
+
+[Desktop Action postit]
+Name=Novo post-it
+Exec=feathernotes --postit
