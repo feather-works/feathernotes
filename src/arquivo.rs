@@ -346,6 +346,20 @@ mod testes {
     }
 }
 
+/// Na primeira vez, o FeatherNotes vira o app padrão de .txt e .md; depois a escolha do usuário manda.
+#[cfg(target_os = "linux")]
+pub fn tornar_padrao() {
+    let marca = pasta_dados().join("padrao");
+    if marca.exists() {
+        return;
+    }
+    let feito = std::process::Command::new("xdg-mime").args(["default", "feathernotes.desktop", "text/plain", "text/markdown"]).status().is_ok_and(|s| s.success());
+    if feito {
+        let _ = std::fs::create_dir_all(pasta_dados());
+        let _ = gravar(&marca, b"");
+    }
+}
+
 /// Põe o FeatherNotes no menu de aplicativos e na dock (com "Novo post-it" no clique direito do
 /// ícone). Só reescreve quando muda: o executável pode ter ido para outra pasta.
 // shortcut: só Linux (freedesktop); no Windows o atalho do Menu Iniciar vem do instalador.
@@ -358,7 +372,7 @@ pub fn registrar_no_sistema(icone_svg: &str) -> io::Result<()> {
     let exe = exe.display();
     // StartupWMClass casa com o `app_id` das janelas: é assim que a dock junta as janelas no ícone.
     let entrada = format!(
-        "[Desktop Entry]\nType=Application\nName=FeatherNotes\nComment=Bloco de notas e post-its\nExec=\"{exe}\"\nIcon=feathernotes\nTerminal=false\nCategories=Utility;TextEditor;\nStartupWMClass=feathernotes\nActions=postit;\n\n[Desktop Action postit]\nName=Novo post-it\nExec=\"{exe}\" --postit\n"
+        "[Desktop Entry]\nType=Application\nName=FeatherNotes\nComment=Bloco de notas e post-its\nExec=\"{exe}\" %F\nMimeType=text/plain;text/markdown;\nIcon=feathernotes\nTerminal=false\nCategories=Utility;TextEditor;\nStartupWMClass=feathernotes\nActions=postit;\n\n[Desktop Action postit]\nName=Novo post-it\nExec=\"{exe}\" --postit\n"
     );
     for (caminho, conteudo) in [(&icone, icone_svg), (&desktop, entrada.as_str())] {
         if std::fs::read_to_string(caminho).ok().as_deref() != Some(conteudo) {

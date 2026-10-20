@@ -47,7 +47,7 @@ pub fn pedidos(l: TcpListener) -> impl futures::Stream<Item = String> + Send {
         for s in l.incoming().flatten() {
             let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
             let mut linha = String::new();
-            if BufReader::new(&s).take(256).read_line(&mut linha).is_ok() {
+            if BufReader::new(&s).take(64 * 1024).read_line(&mut linha).is_ok() {
                 if let Some(p) = linha.trim().strip_prefix(PREFIXO) {
                     let _ = writeln!(&s, "ok");
                     if futures::executor::block_on(futures::SinkExt::send(&mut envia, p.to_owned())).is_err() {

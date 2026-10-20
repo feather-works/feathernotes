@@ -46,7 +46,16 @@ fn main() -> Result<(), Error> {
     let postit = std::env::args().any(|a| a == "--postit");
     // `--fundo`: o início com o sistema; só os post-its que estavam abertos aparecem.
     let fundo = std::env::args().any(|a| a == "--fundo");
-    let porta = match instancia::iniciar(if postit { "postit" } else { "mostrar" }) {
+    // Os arquivos do "Abrir com" (o %F do .desktop); a linha do pedido não comporta quebra no nome.
+    let arquivos: Vec<PathBuf> = std::env::args_os().skip(1).filter(|a| !a.to_string_lossy().starts_with("--")).filter_map(|a| std::path::absolute(a).ok()).filter(|p| !p.to_string_lossy().contains(['\n', '\0'])).collect();
+    let pedido = if !arquivos.is_empty() {
+        arquivos.iter().fold("abrir".to_string(), |s, p| format!("{s}\0{}", p.display()))
+    } else if postit {
+        "postit".into()
+    } else {
+        "mostrar".into()
+    };
+    let porta = match instancia::iniciar(&pedido) {
         instancia::Inicio::Entregue => return Ok(()),
         instancia::Inicio::Primeiro(l) => l,
     };
@@ -64,12 +73,15 @@ fn main() -> Result<(), Error> {
                 n.aviso = Some(format!("Não deu para pôr o FeatherNotes no menu de aplicativos: {e}"));
             }
         }
+        #[cfg(target_os = "linux")]
+        arquivo::tornar_padrao();
         let pedidos = porta.map(|l| Task::run(instancia::pedidos(l), Msg::Pedido));
         let novo = postit.then(|| Task::done(Msg::NovoPostIt));
+        let abrir_arquivos = (!arquivos.is_empty()).then(|| Task::done(Msg::Abertos(arquivos)));
         // Os post-its que estavam abertos voltam junto.
         let abrir: Vec<usize> = (0..n.postits.len()).filter(|&i| n.postits[i].aberto).collect();
         let abertos: Vec<Task<Msg>> = abrir.into_iter().map(|i| n.abrir_postit(i)).collect();
-        (n, Task::batch([Task::run(tique(Duration::from_secs(2)), |_| Msg::Medir)].into_iter().chain(abertos).chain(pedidos).chain(novo)))
+        (n, Task::batch([Task::run(tique(Duration::from_secs(2)), |_| Msg::Medir)].into_iter().chain(abertos).chain(pedidos).chain(novo).chain(abrir_arquivos)))
     })
 }
 
@@ -1613,6 +1625,10 @@ impl App for Notas {
             Msg::Maximizar => return Task::window(WindowCmd::ToggleMaximize),
             Msg::Pedido(p) => match p.as_str() {
                 "postit" => return self.update(Msg::NovoPostIt),
+                _ if p.starts_with("abrir\0") => {
+                    let _ = self.update(Msg::Abertos(p.split('\0').skip(1).map(PathBuf::from).collect()));
+                    return self.update(Msg::MostrarPrincipal);
+                }
                 _ => return self.update(Msg::MostrarPrincipal),
             },
             Msg::IniciarComSistema(ligar) => {
