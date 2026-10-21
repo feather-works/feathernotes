@@ -1,20 +1,23 @@
 //! RAM e CPU do próprio app, para o rodapé (o mesmo do launcher).
 
-/// RSS do processo em KiB.
+/// Memória privada do processo em KiB, a mesma conta do Gerenciador de Tarefas: sem as bibliotecas
+/// compartilhadas (drivers de vídeo), que o sistema e os outros programas já têm carregadas.
 #[cfg(not(windows))]
 pub fn rss_kb() -> Option<u64> {
-    std::fs::read_to_string("/proc/self/status").ok()?.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()
+    std::fs::read_to_string("/proc/self/status").ok()?.lines().find(|l| l.starts_with("RssAnon:"))?.split_whitespace().nth(1)?.parse().ok()
 }
 
 #[cfg(windows)]
 pub fn rss_kb() -> Option<u64> {
-    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX2};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     // SAFETY: estrutura zerada, tamanho correto e o pseudo-handle do próprio processo.
-    let mut c: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
-    let tamanho = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mut c: PROCESS_MEMORY_COUNTERS_EX2 = unsafe { std::mem::zeroed() };
+    let tamanho = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32;
     c.cb = tamanho;
-    (unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, tamanho) } != 0).then(|| c.WorkingSetSize as u64 / 1024)
+    // O campo privado só existe do Windows 10 21H2 em diante; antes fica zero e vale o total.
+    (unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut _ as *mut _, tamanho) } != 0)
+        .then(|| if c.PrivateWorkingSetSize > 0 { c.PrivateWorkingSetSize } else { c.WorkingSetSize } as u64 / 1024)
 }
 
 /// (CPU do processo, CPU da máquina) em ticks do `/proc`; a razão entre duas amostras é o uso.

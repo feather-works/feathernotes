@@ -9,12 +9,16 @@ repository = "https://github.com/feather-works/feathernotes"
 publish = false
 
 [dependencies]
-pelicano = { git = "https://github.com/feather-works/pelicano", tag = "v0.1.8" }
+pelicano = { git = "https://github.com/feather-works/pelicano", tag = "v0.1.9" }
 rfd = "0.16"
 dirs = "6"
 # Codificações legadas (Windows-125x, ISO-8859, CJK, KOI8…) e o palpite de qual é a de um arquivo.
 encoding_rs = "0.8"
 chardetng = "0.1"
+# Links falsos: letras que se confundem (TR39 do Unicode), o nome de cada uma e o endereço em punycode.
+unicode-security = "0.1"
+unicode_names2 = "2"
+idna = "1"
 
 [profile.release]
 lto = "thin"

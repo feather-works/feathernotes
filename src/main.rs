@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 //! FeatherNotes: bloco de notas simples da suíte FeatherWorks. Abas, localizar e substituir,
 //! e uma sessão que volta como estava (com o que não foi salvo) quando o app abre de novo.
+mod alfabeto;
 mod arquivo;
 mod codificacao;
 mod consumo;
@@ -186,6 +187,8 @@ struct Notas {
     foco: u64,
     /// ((aba, versão), quantos ocultos): contar o texto só quando ele muda.
     ocultos: std::cell::RefCell<Option<((u64, u64), usize)>>,
+    /// ((aba, versão), palavras de link falso), também só quando o texto muda.
+    suspeitas: std::cell::RefCell<Option<((u64, u64), Vec<alfabeto::Suspeita>)>>,
     /// ((aba, versão), [linhas, palavras, caracteres sem espaço, todos]) do painel de propriedades.
     estatisticas: std::cell::RefCell<Option<((u64, u64), [usize; 4])>>,
     postits: Vec<PostIt>,
@@ -216,6 +219,8 @@ enum Msg {
     Markdown(bool),
     Formatar(Formato),
     ProximoOculto,
+    ProximaSuspeita,
+    AbrirLink(String),
     Codificacao(Cod),
     QuebraLinha(Quebra),
     AbrirPasta,
@@ -339,7 +344,7 @@ impl Notas {
             abas.push(Aba::nova(proximo_id, None));
         }
         let escuro = escuro(prefs.tema);
-        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: cfg!(target_os = "linux") && arquivo::tem_atalho_postit() };
+        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: cfg!(target_os = "linux") && arquivo::tem_atalho_postit() };
         n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0 }).collect();
         n.carregar(n.ativa);
         n
@@ -354,6 +359,7 @@ impl Notas {
         // Todo texto novo começa na versão 0: a contagem guardada pode ser da aba que estava no lugar.
         self.estatisticas.take();
         self.ocultos.take();
+        self.suspeitas.take();
         let copia = arquivo::recuperacao(aba.id);
         let original = aba.caminho.as_ref().map(std::fs::read);
         let (texto, salvo) = if let Ok(bytes) = std::fs::read(&copia) {
@@ -392,6 +398,33 @@ impl Notas {
     fn ativar(&mut self, i: usize) {
         self.ativa = i.min(self.abas.len() - 1);
         self.carregar(self.ativa);
+    }
+
+    /// As palavras da aba com letras disfarçadas (link falso), procuradas só quando o texto muda.
+    fn suspeitas(&self) -> Vec<alfabeto::Suspeita> {
+        let conteudo = self.conteudo();
+        let chave = (self.abas[self.ativa].id, conteudo.version());
+        let mut cache = self.suspeitas.borrow_mut();
+        match &*cache {
+            Some((k, lista)) if *k == chave => lista.clone(),
+            _ => {
+                // Só ASCII e acentos do latim: não há o que procurar, nem copia o texto.
+                let lista = if conteudo.count_chars(alfabeto::vale_procurar) > 0 { alfabeto::procurar(&conteudo.text()) } else { Vec::new() };
+                *cache = Some((chave, lista.clone()));
+                lista
+            }
+        }
+    }
+
+    /// As palavras suspeitas sem repetir, na ordem do texto.
+    fn palavras_suspeitas(&self) -> Vec<String> {
+        let mut palavras: Vec<String> = Vec::new();
+        for s in self.suspeitas() {
+            if !palavras.contains(&s.palavra) {
+                palavras.push(s.palavra);
+            }
+        }
+        palavras
     }
 
     fn conteudo(&self) -> &Content {
@@ -572,6 +605,9 @@ impl Notas {
             .font(Font::DEFAULT)
             .wrap(true)
             .markdown(true)
+            // Post-it é curto: procura a cada quadro, sem guardar.
+            .warnings(avisos(if p.conteudo.count_chars(alfabeto::vale_procurar) > 0 { alfabeto::procurar(&p.conteudo.text()) } else { Vec::new() }))
+            .on_link(Msg::AbrirLink)
             .padding(Padding { top: 6.0, right: 14.0, bottom: 10.0, left: 14.0 })
             .on_change(Msg::PostItMudou)
             .autofocus(1)
@@ -702,6 +738,7 @@ impl Notas {
                 aba.converter = false;
                 self.estatisticas.take();
                 self.ocultos.take();
+                self.suspeitas.take();
                 self.aviso = ruim.then(|| format!("Alguns bytes não fazem sentido em {}: viraram �", cod.nome()));
             }
             Err(e) => self.aviso = Some(format!("Não abriu: {e}")),
@@ -889,6 +926,11 @@ fn formatar(c: &Content, f: Formato) {
         Formato::Numerada => c.edit_lines(linha("1. ".into())),
         Formato::Tarefa => c.edit_lines(linha("- [ ] ".into())),
     }
+}
+
+/// As palavras suspeitas como o editor sublinha (a dica é a de cada uma).
+fn avisos(lista: Vec<alfabeto::Suspeita>) -> Vec<Warning> {
+    lista.into_iter().map(|s| Warning { line: s.linha, range: s.bytes, tip: s.dica }).collect()
 }
 
 /// Como o caractere oculto aparece no rodapé.
@@ -1085,9 +1127,19 @@ impl Notas {
             let rotulo = if n == 1 { "1 caractere oculto".to_string() } else { format!("{n} caracteres ocultos") };
             button(text(rotulo).size(12).color(Color::rgb8(0xe8, 0x71, 0x0a))).on_press(Msg::ProximoOculto).padding([3u16, 8]).style(plano(c, false))
         });
+        let suspeitas = self.suspeitas();
+        let palavras = self.palavras_suspeitas().len();
+        let aviso_suspeitas = (palavras > 0).then(|| {
+            let rotulo = if palavras == 1 { "1 palavra suspeita".to_string() } else { format!("{palavras} palavras suspeitas") };
+            button(text(rotulo).size(12).color(Color::rgb8(0xe8, 0x71, 0x0a))).on_press(Msg::ProximaSuspeita).padding([3u16, 8]).style(plano(c, false))
+        });
+        // A palavra selecionada é suspeita: quais letras estão disfarçadas.
+        let selecao = conteudo.selection();
+        let sob_cursor = sob_cursor.or_else(|| suspeitas.into_iter().find(|s| selecao.as_deref() == Some(&s.palavra)).map(|s| item(s.resumo)));
         let linha = row![clicavel(format!("Ln {ln}, Col {col}"), Msg::IrPara), item(self.recursos.clone())]
             .push_maybe(sob_cursor)
             .push_maybe(aviso_ocultos)
+            .push_maybe(aviso_suspeitas)
             .push(horizontal_space())
             .push_maybe(self.aviso.as_ref().map(|a| item(a.clone())))
             .push_maybe(aba.acentos_quebrados.then(|| button(text("Acentos quebrados (Ã£)? Consertar").size(12).color(Color::rgb8(0xe8, 0x71, 0x0a))).on_press(Msg::ConsertarAcentos).padding([3u16, 8]).style(plano(c, false))))
@@ -1427,6 +1479,15 @@ impl App for Notas {
             Msg::ProximoOculto => {
                 self.conteudo().find_char(is_invisible);
             }
+            // Uma palavra diferente por clique, a partir da que está selecionada.
+            Msg::ProximaSuspeita => {
+                let lista = self.palavras_suspeitas();
+                let atual = self.conteudo().selection();
+                let depois = atual.and_then(|a| lista.iter().position(|p| *p == a)).map_or(0, |i| i + 1);
+                if let Some(p) = lista.get(depois % lista.len().max(1)) {
+                    self.conteudo().find_next(p, true);
+                }
+            }
             Msg::IrPara => {
                 self.menu = false;
                 self.ir_para = Some(String::new());
@@ -1461,6 +1522,18 @@ impl App for Notas {
                     aba.quebra = q;
                     aba.converter = true;
                     aba.salvo = None;
+                }
+            }
+            Msg::AbrirLink(url) => {
+                // Só da web e e-mail: um "file://" ou um programa no link não abrem com um clique.
+                let minusculo = url.to_ascii_lowercase();
+                if !["http://", "https://", "mailto:"].iter().any(|p| minusculo.starts_with(p)) {
+                    self.aviso = Some(format!("Não abre este tipo de link: {url}"));
+                } else {
+                    let programa = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                    if let Err(e) = std::process::Command::new(programa).arg(&url).spawn() {
+                        self.aviso = Some(format!("Não abriu o link: {e}"));
+                    }
                 }
             }
             Msg::AbrirPasta => {
@@ -1834,6 +1907,8 @@ impl App for Notas {
             .on_change(Msg::Mudou)
             .autofocus(self.foco)
             .invisibles(self.prefs.invisiveis)
+            .warnings(avisos(self.suspeitas()))
+            .on_link(Msg::AbrirLink)
             .markdown(self.abas[self.ativa].markdown)
             .style(move |_, _| Style::default().background(c.papel).text_color(c.texto));
         let topo = container(self.barra(c)).width(Length::FILL).style(move |_| Style::default().background(c.barra).backdrop_blur(20.0));
@@ -1915,6 +1990,44 @@ mod testes {
         let vazio = n.postits.last().unwrap().id;
         let _ = n.update(Msg::PostItFechar(vazio));
         assert!(!n.postits.iter().any(|p| p.id == vazio));
+    }
+
+    /// Link que não é da web nem e-mail não abre: só avisa.
+    #[test]
+    fn link_de_arquivo_nao_abre() {
+        let mut n = Notas::novo();
+        let _ = n.update(Msg::AbrirLink("file:///etc/passwd".into()));
+        assert_eq!(n.aviso.as_deref(), Some("Não abre este tipo de link: file:///etc/passwd"));
+    }
+
+    /// O rodapé conta as palavras de link falso, e o clique passa de uma para a outra.
+    #[test]
+    fn palavras_suspeitas_no_rodape() {
+        let mut n = Notas::novo();
+        n.prefs.configurado = true;
+        n.abas[n.ativa].conteudo = Some(Content::with_text("Sua conta foi bloqueada.\nEntre em https://pаypal.com/login para liberar.\nOu ligue para o suporte da gοogle.com.\nNovo endereço: аррӏе.com\nПривет, olá, café, Δt = 2πr: normal.\n"));
+        let tela = |n: &Notas| capture(&n.view(), Size::new(980.0, 420.0), 1.0, &n.theme(), &mut Renderer::new(), None);
+        tela(&n);
+        assert_eq!(n.palavras_suspeitas(), vec!["pаypal", "gοogle", "аррӏе"]);
+        let _ = n.update(Msg::ProximaSuspeita);
+        assert_eq!(n.conteudo().selection().as_deref(), Some("pаypal"));
+        let _ = n.update(Msg::ProximaSuspeita);
+        assert_eq!(n.conteudo().selection().as_deref(), Some("gοogle"));
+        let _ = n.update(Msg::ProximaSuspeita);
+        assert_eq!(n.conteudo().selection().as_deref(), Some("аррӏе"));
+        let _ = n.update(Msg::ProximaSuspeita);
+        assert_eq!(n.conteudo().selection().as_deref(), Some("pаypal"));
+        let png = tela(&n);
+        if let Some(d) = std::env::var_os("FEATHERNOTES_CAPTURAR") {
+            std::fs::write(PathBuf::from(&d).join("alfabetos.png"), png).unwrap();
+            // Com o mouse sobre o "pаypal" (posição do texto fixo acima): a dica aberta.
+            let (e, tam, st) = (n.view(), Size::new(980.0, 420.0), States::default());
+            let mut r = Renderer::new();
+            r.begin(tam, 1.0, Color::TRANSPARENT);
+            let no = layout(&e, tam, &mut r, &st, &n.theme());
+            draw(&e, &no, &mut r, &st, &n.theme(), Some(Point::new(243.0, 92.0)), false);
+            std::fs::write(PathBuf::from(&d).join("alfabetos-dica.png"), r.pixmap.encode_png().unwrap()).unwrap();
+        }
     }
 
     /// A tela desenha sem GPU nos dois temas, com o menu, a busca e a confirmação abertos.
