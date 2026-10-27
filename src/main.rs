@@ -76,7 +76,7 @@ fn main() -> Result<(), Error> {
         }
         #[cfg(target_os = "linux")]
         arquivo::tornar_padrao();
-        let pedidos = porta.map(|l| Task::run(instancia::pedidos(l), Msg::Pedido));
+        let pedidos = porta.map(|(l, senha)| Task::run(instancia::pedidos(l, senha), Msg::Pedido));
         let novo = postit.then(|| Task::done(Msg::NovoPostIt));
         let abrir_arquivos = (!arquivos.is_empty()).then(|| Task::done(Msg::Abertos(arquivos)));
         // Os post-its que estavam abertos voltam junto.
@@ -325,6 +325,7 @@ enum Formato {
     Lista,
     Numerada,
     Tarefa,
+    Tabela,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -338,7 +339,7 @@ impl Notas {
     fn novo() -> Self {
         let prefs = arquivo::ler_preferencias();
         let (ativa, salvas) = arquivo::ler_sessao();
-        let mut abas: Vec<Aba> = salvas.into_iter().map(|AbaSalva { id, caminho, markdown, cod }| Aba { markdown: markdown || caminho.as_deref().is_some_and(eh_markdown), cod_salva: cod, ..Aba::nova(id, caminho) }).collect();
+        let mut abas: Vec<Aba> = salvas.into_iter().map(|AbaSalva { id, caminho, markdown, cod, quebra }| Aba { markdown: markdown || caminho.as_deref().is_some_and(eh_markdown), cod_salva: cod, quebra: quebra.unwrap_or(Quebra::Lf), converter: quebra.is_some(), ..Aba::nova(id, caminho) }).collect();
         let proximo_id = abas.iter().map(|a| a.id + 1).max().unwrap_or(1);
         if abas.is_empty() {
             abas.push(Aba::nova(proximo_id, None));
@@ -388,7 +389,10 @@ impl Notas {
                 None => (String::new(), Some(0)),
             }
         };
-        aba.quebra = Quebra::de(&texto);
+        // A quebra escolhida (e ainda não salva) vale mais que a do texto.
+        if !aba.converter {
+            aba.quebra = Quebra::de(&texto);
+        }
         aba.acentos_quebrados = codificacao::consertar_acentos(&texto).is_some();
         aba.conteudo = Some(Content::with_text(&texto));
         aba.salvo = salvo;
@@ -468,7 +472,7 @@ impl Notas {
             }
         }
         self.guardar_postits();
-        let lista: Vec<AbaSalva> = self.abas.iter().map(|a| AbaSalva { id: a.id, caminho: a.caminho.clone(), markdown: a.markdown, cod: a.conteudo.as_ref().map_or(a.cod_salva, |_| Some(a.cod)) }).collect();
+        let lista: Vec<AbaSalva> = self.abas.iter().map(|a| AbaSalva { id: a.id, caminho: a.caminho.clone(), markdown: a.markdown, cod: a.conteudo.as_ref().map_or(a.cod_salva, |_| Some(a.cod)), quebra: a.converter.then_some(a.quebra) }).collect();
         if let Err(e) = arquivo::gravar_sessao(self.ativa, &lista) {
             self.aviso = Some(format!("Não guardou a sessão: {e}"));
         }
@@ -752,6 +756,12 @@ impl Notas {
     }
 }
 
+/// Abre um link ou uma pasta com o programa padrão do sistema.
+fn abrir_no_sistema(alvo: impl AsRef<std::ffi::OsStr>) -> std::io::Result<std::process::Child> {
+    let programa = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    std::process::Command::new(programa).arg(alvo).spawn()
+}
+
 fn eh_markdown(p: &std::path::Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
@@ -825,6 +835,7 @@ const ICONE_MAIS_ZOOM: &str = r#"<circle cx="11" cy="11" r="7"/><path d="M21 21l
 const ICONE_INFO: &str = r#"<circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/>"#;
 const ICONE_SETA: &str = r#"<path d="M6 9l6 6 6-6"/>"#;
 const ICONE_LINK: &str = r#"<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>"#;
+const ICONE_TABELA: &str = r#"<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M4 14.5h16M10 5v14"/>"#;
 const ICONE_TAREFA: &str = r#"<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>"#;
 const ICONE_CERTO: &str = r#"<path d="M5 12.5l4.5 4.5L19 7.5" stroke-width="3"/>"#;
 const ICONE_ALFINETE: &str = r#"<path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 15v5"/>"#;
@@ -925,7 +936,103 @@ fn formatar(c: &Content, f: Formato) {
         Formato::Lista => c.edit_lines(linha("- ".into())),
         Formato::Numerada => c.edit_lines(linha("1. ".into())),
         Formato::Tarefa => c.edit_lines(linha("- [ ] ".into())),
+        Formato::Tabela => {
+            let sel = c.selection().unwrap_or_default();
+            if sel.to_ascii_lowercase().contains("<table") {
+                c.insert(&tabela_html(&sel));
+            } else {
+                // A tabela começa numa linha nova, depois de uma em branco; o que estava selecionado fica antes dela.
+                let vazia = sel.is_empty() && c.line(c.cursor().0).is_none_or(|l| l.trim().is_empty());
+                c.insert(&format!("{sel}{}| Coluna 1 | Coluna 2 |\n| --- | --- |\n|  |  |\n", if vazia { "" } else { "\n\n" }));
+            }
+        }
     }
+}
+
+/// As `<table>` de um HTML viram tabelas de Markdown; o texto em volta fica como está.
+fn tabela_html(html: &str) -> String {
+    // Minúsculas só no ASCII: as posições continuam as mesmas do original.
+    let min = html.to_ascii_lowercase();
+    let mut saida = String::new();
+    let mut desde = 0;
+    while let Some(a) = tag(&min, desde, &["<table"]).map(|p| p.0) {
+        let z = min[a..].find("</table>").map_or(html.len(), |k| a + k + 8);
+        saida.push_str(&html[desde..a]);
+        saida.push_str(&linhas_da_tabela(&html[..z], &min[..z], a));
+        desde = z;
+    }
+    saida + &html[desde..]
+}
+
+/// A próxima tag de um dos `nomes` (`<th`, e não `<thead`), com a posição e qual foi.
+fn tag<'n>(min: &str, desde: usize, nomes: &[&'n str]) -> Option<(usize, &'n str)> {
+    nomes
+        .iter()
+        .filter_map(|&n| {
+            let mut i = desde;
+            while let Some(k) = min[i..].find(n) {
+                let p = i + k;
+                if min.as_bytes().get(p + n.len()).is_none_or(|b| matches!(b, b'>' | b'/') || b.is_ascii_whitespace()) {
+                    return Some((p, n));
+                }
+                i = p + 1;
+            }
+            None
+        })
+        .min()
+}
+
+// shortcut: tabela dentro de célula e colspan/rowspan não são entendidos; tratar se aparecerem.
+fn linhas_da_tabela(html: &str, min: &str, desde: usize) -> String {
+    let mut linhas: Vec<Vec<String>> = Vec::new();
+    let mut i = desde;
+    while let Some((p, nome)) = tag(min, i, &["<tr", "<td", "<th"]) {
+        let dentro = min[p..].find('>').map_or(min.len(), |k| p + k + 1);
+        if nome == "<tr" || linhas.is_empty() {
+            linhas.push(Vec::new());
+        }
+        i = dentro;
+        if nome != "<tr" {
+            let fim = tag(min, dentro, &["<tr", "<td", "<th", "</tr", "</td", "</th", "</table"]).map_or(min.len(), |p| p.0);
+            linhas.last_mut().expect("tem linha").push(celula(&html[dentro..fim]));
+            i = fim;
+        }
+    }
+    linhas.retain(|l| !l.is_empty());
+    let colunas = linhas.iter().map(Vec::len).max().unwrap_or(0);
+    if colunas == 0 {
+        return html[desde..].to_owned();
+    }
+    let linha = |l: &[String]| format!("| {} |\n", (0..colunas).map(|k| l.get(k).map_or("", String::as_str)).collect::<Vec<_>>().join(" | "));
+    let mut md = linha(&linhas[0]);
+    md += &format!("|{}\n", " --- |".repeat(colunas));
+    for l in &linhas[1..] {
+        md += &linha(l);
+    }
+    md
+}
+
+/// O texto de uma célula: sem tags, com as entidades comuns e numa linha só.
+fn celula(html: &str) -> String {
+    let mut t = String::new();
+    let mut tag: Option<String> = None;
+    for ch in html.chars() {
+        match (&mut tag, ch) {
+            (None, '<') => tag = Some(String::new()),
+            (Some(n), '>') => {
+                // <br>, <p>, <div> e <li> separam palavras; <b> e <span> ficam colados ("Ca<b>fé</b>").
+                let nome = n.trim_start_matches('/').chars().take_while(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+                if matches!(nome.as_str(), "br" | "p" | "div" | "li") {
+                    t.push(' ');
+                }
+                tag = None;
+            }
+            (Some(n), _) => n.push(ch),
+            (None, _) => t.push(ch),
+        }
+    }
+    let t = t.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
+    t.split_whitespace().collect::<Vec<_>>().join(" ").replace('|', "\\|")
 }
 
 /// As palavras suspeitas como o editor sublinha (a dica é a de cada uma).
@@ -990,14 +1097,10 @@ impl Notas {
         let largura = ((self.largura - 460.0) / self.abas.len() as f32 - 4.0).clamp(90.0, 190.0);
         for (i, aba) in self.abas.iter().enumerate() {
             let ativa = i == self.ativa;
-            let mut nome = aba.nome();
-            if nome.chars().count() > 26 {
-                nome = nome.chars().take(24).collect::<String>() + "…";
-            }
             // Alterada: um ponto no lugar do ×, como nos editores de código.
             let fechar: Element<'_, Msg> = if aba.alterada() { text("●").size(10).color(c.mudo).into() } else { traco(ICONE_X, 13.0, c.mudo).into() };
             let x = button(container(fechar).center()).on_press(Msg::FecharAba(aba.id)).width(22.0).height(22.0).padding(0.0).style(plano(c, false));
-            let corpo = row![text(nome).size(13).color(if ativa { c.texto } else { c.mudo }), horizontal_space(), x].spacing(10).align(Align::Center).padding(Padding { left: 14.0, right: 6.0, ..Padding::ZERO }).width(largura).height(34.0);
+            let corpo = row![text(aba.nome()).size(13).color(if ativa { c.texto } else { c.mudo }).ellipsis().width(Length::FILL), x].spacing(10).align(Align::Center).padding(Padding { left: 14.0, right: 6.0, ..Padding::ZERO }).width(largura).height(34.0);
             let fundo = if ativa { c.papel } else { Color::TRANSPARENT };
             let aba_ = button(corpo).on_press(Msg::Aba(i)).padding(0.0).style(move |_, s| {
                 let bg = if ativa { fundo } else if matches!(s, Status::Hovered | Status::Pressed) { c.sobre } else { fundo };
@@ -1095,6 +1198,7 @@ impl Notas {
             b("•", Font::BOLD, Formato::Lista, "Lista (Ctrl+Shift+8)"),
             b("1.", Font::DEFAULT, Formato::Numerada, "Lista numerada (Ctrl+Shift+7)"),
             icone(ICONE_TAREFA, Formato::Tarefa, "Lista de tarefas (Ctrl+Shift+9)"),
+            icone(ICONE_TABELA, Formato::Tabela, "Tabela (com um <table> do HTML selecionado, converte)"),
         ]
         .spacing(2)
         .align(Align::Center)
@@ -1530,16 +1634,14 @@ impl App for Notas {
                 if !["http://", "https://", "mailto:"].iter().any(|p| minusculo.starts_with(p)) {
                     self.aviso = Some(format!("Não abre este tipo de link: {url}"));
                 } else {
-                    let programa = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-                    if let Err(e) = std::process::Command::new(programa).arg(&url).spawn() {
+                    if let Err(e) = abrir_no_sistema(&url) {
                         self.aviso = Some(format!("Não abriu o link: {e}"));
                     }
                 }
             }
             Msg::AbrirPasta => {
                 if let Some(pasta) = self.abas[self.ativa].caminho.as_ref().and_then(|p| p.parent()) {
-                    let programa = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-                    if let Err(e) = std::process::Command::new(programa).arg(pasta).spawn() {
+                    if let Err(e) = abrir_no_sistema(pasta) {
                         self.aviso = Some(format!("Não abriu a pasta: {e}"));
                     }
                 }
@@ -1959,6 +2061,24 @@ mod testes {
         c.find_next(" ## oi", true);
         formatar(&c, Formato::Tachado);
         assert_eq!(c.text(), " ## ~~oi~~");
+    }
+
+    #[test]
+    fn tabela_do_html() {
+        let html = "antes\n<TABLE><thead><tr><th>Nome</th><th>Preço</th></tr></thead><tr><td><b>Café</b> &amp; pão</td><td>R$ 5|6</td></tr><tr><td>Só</td></tr></table>\ndepois";
+        assert_eq!(tabela_html(html), "antes\n| Nome | Preço |\n| --- | --- |\n| Café & pão | R$ 5\\|6 |\n| Só |  |\n\ndepois");
+        assert_eq!(celula("Ca<b>fé</b> R$<span>5</span>"), "Café R$5");
+        assert_eq!(celula("um<br>dois<p>três</p>"), "um dois três");
+    }
+
+    /// O texto selecionado que não é HTML fica, e a tabela vem depois dele.
+    #[test]
+    fn tabela_nao_apaga_a_selecao() {
+        let c = Content::with_text("Nome Idade");
+        capture(&text_editor::<Msg>(&c).into(), Size::new(300.0, 100.0), 1.0, &Theme::light(), &mut Renderer::new(), None);
+        c.find_next("Nome Idade", true);
+        formatar(&c, Formato::Tabela);
+        assert_eq!(c.text(), "Nome Idade\n\n| Coluna 1 | Coluna 2 |\n| --- | --- |\n|  |  |\n");
     }
 
     /// Excluir manda para a lixeira (o texto fica); só "Apagar" da lixeira tira de vez; vazio some ao fechar.

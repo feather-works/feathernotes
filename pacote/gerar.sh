@@ -7,8 +7,9 @@
 #   SHA256SUMS
 #
 # Uso: pacote/gerar.sh [linux|windows ...]   (sem argumentos = todos)
-# Precisa de: cargo, dpkg-deb; para Windows, o alvo x86_64-pc-windows-gnu,
-# mingw-w64 e makensis.
+# Precisa de: cargo, dpkg-deb, objdump; podman ou docker para o Linux (sem eles compila aqui,
+# e o .deb só instala em distros com a glibc desta máquina); para Windows, o alvo
+# x86_64-pc-windows-gnu, mingw-w64 e makensis.
 set -euo pipefail
 
 pacote="$(cd "$(dirname "$0")" && pwd)"
@@ -21,9 +22,35 @@ alvos=("$@")
 rm -rf "$saida" && mkdir -p "$saida"
 echo "FeatherNotes $versao → $saida"
 
+# O binário pede a glibc de onde foi compilado: num Debian 12 (2.36) ele roda no Ubuntu 22.04+,
+# Debian 12+ e Mint 21+. Compilado aqui pediria a glibc desta máquina.
+compilar_linux() {
+  local motor; motor="$(command -v podman || command -v docker || true)"
+  if [[ -z $motor ]]; then
+    echo "Sem podman nem docker: compilando aqui (o .deb vai pedir a glibc desta máquina)." >&2
+    cargo build --release --manifest-path "$raiz/Cargo.toml"
+    bin="$alvo/release/feathernotes"
+    return
+  fi
+  # A imagem com o Rust sai uma vez só; o registro de crates fica guardado num volume.
+  if ! "$motor" image exists feathernotes-debian12 2>/dev/null && ! "$motor" image inspect feathernotes-debian12 >/dev/null 2>&1; then
+    "$motor" build -t feathernotes-debian12 -f - "$pacote" <<'IMG'
+FROM docker.io/library/debian:12
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev curl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH
+IMG
+  fi
+  "$motor" run --rm -v "$raiz":/src:z -v feathernotes-registro:/root/.cargo/registry -e CARGO_TARGET_DIR=/src/target/debian12 -w /src \
+    feathernotes-debian12 cargo build --release
+  bin="$raiz/target/debian12/release/feathernotes"
+}
+
 linux() {
-  cargo build --release --manifest-path "$raiz/Cargo.toml"
-  local bin="$alvo/release/feathernotes"
+  local bin; compilar_linux
+  # A glibc mínima é a maior versão que o binário usa.
+  local glibc; glibc="$(objdump -T "$bin" | grep -o 'GLIBC_2\.[0-9]*' | sort -V | tail -1 | cut -d_ -f2)"
+  echo "glibc mínima: $glibc"
 
   # .deb
   local d; d="$(mktemp -d)"
@@ -43,7 +70,7 @@ Section: editors
 Priority: optional
 Architecture: amd64
 Installed-Size: $tamanho
-Depends: libc6 (>= 2.43), libxkbcommon0, libwayland-client0 | libx11-6, libfontconfig1
+Depends: libc6 (>= $glibc), libxkbcommon0, libwayland-client0 | libx11-6, libfontconfig1
 Recommends: libvulkan1 | libgl1
 Maintainer: FeatherWorks <https://github.com/feather-works>
 Homepage: https://github.com/feather-works/feathernotes

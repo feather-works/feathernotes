@@ -8,8 +8,9 @@ use std::time::Duration;
 pub enum Inicio {
     /// Outro já estava aberto e recebeu o pedido.
     Entregue,
-    /// Somos o primeiro; `None` se não deu para escutar (aí cada um abre sozinho, como antes).
-    Primeiro(Option<TcpListener>),
+    /// Somos o primeiro, com a senha que os pedidos trazem; `None` se não deu para escutar (aí cada
+    /// um abre sozinho, como antes).
+    Primeiro(Option<(TcpListener, String)>),
 }
 
 const PREFIXO: &str = "feathernotes ";
@@ -18,7 +19,11 @@ const PREFIXO: &str = "feathernotes ";
 // shortcut: dois abrindo no mesmo instante podem os dois virar "primeiro"; um trava de arquivo quando alguém notar.
 pub fn iniciar(pedido: &str) -> Inicio {
     let arquivo = crate::arquivo::arquivo_porta();
-    let porta = std::fs::read_to_string(&arquivo).ok().and_then(|p| p.trim().parse::<u16>().ok());
+    // "porta senha"; as versões até a 0.1.5 anotam só a porta.
+    let anotado = std::fs::read_to_string(&arquivo).unwrap_or_default();
+    let mut campos = anotado.split_whitespace();
+    let porta = campos.next().and_then(|p| p.parse::<u16>().ok());
+    let senha = campos.next().map_or(String::new(), |s| format!("{s} "));
     if let Some(porta) = porta {
         let endereco = SocketAddr::from((Ipv4Addr::LOCALHOST, porta));
         if let Ok(mut s) = TcpStream::connect_timeout(&endereco, Duration::from_millis(300)) {
@@ -26,7 +31,7 @@ pub fn iniciar(pedido: &str) -> Inicio {
             // a porta velha pode ser de outro programa agora, que nem responde nem fecha.
             let _ = s.set_read_timeout(Some(Duration::from_millis(300)));
             let mut resposta = String::new();
-            if writeln!(s, "{PREFIXO}{pedido}").is_ok() {
+            if writeln!(s, "{PREFIXO}{senha}{pedido}").is_ok() {
                 match BufReader::new(s).read_line(&mut resposta) {
                     Ok(n) if n == 0 || resposta.trim() == "ok" => return Inicio::Entregue,
                     // O aberto é de antes de uma atualização: ele guarda a sessão e sai; esperamos a porta soltar.
@@ -45,22 +50,46 @@ pub fn iniciar(pedido: &str) -> Inicio {
     }
     // Só a máquina local: a porta é escolhida pelo sistema e anotada para o próximo.
     let Ok(l) = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) else { return Inicio::Primeiro(None) };
+    let senha = nova_senha();
     let gravou = l.local_addr().ok().is_some_and(|a| {
         let _ = std::fs::create_dir_all(arquivo.parent().expect("tem pasta"));
-        crate::arquivo::gravar(&arquivo, a.port().to_string().as_bytes()).is_ok()
+        crate::arquivo::gravar(&arquivo, format!("{} {senha}", a.port()).as_bytes()).is_ok() && so_do_dono(&arquivo)
     });
-    Inicio::Primeiro(gravou.then_some(l))
+    Inicio::Primeiro(gravou.then_some((l, senha)))
 }
 
-/// Os pedidos que chegam (uma linha cada); qualquer outra coisa na porta é ignorada.
-pub fn pedidos(l: TcpListener) -> impl futures::Stream<Item = String> + Send {
+/// Qualquer programa da máquina chega na porta (até de outro usuário); só quem lê o arquivo `porta`
+/// sabe a senha. O `RandomState` vem de números aleatórios do sistema.
+fn nova_senha() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let parte = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    format!("{:016x}{:016x}", parte(), parte())
+}
+
+/// O arquivo da porta só para o dono ler (no Windows a pasta do usuário já é só dele).
+fn so_do_dono(arquivo: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(arquivo, std::fs::Permissions::from_mode(0o600)).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = arquivo;
+        true
+    }
+}
+
+/// Os pedidos que chegam (uma linha cada); sem a senha, ou qualquer outra coisa na porta, é ignorado.
+pub fn pedidos(l: TcpListener, senha: String) -> impl futures::Stream<Item = String> + Send {
+    let prefixo = format!("{PREFIXO}{senha} ");
     let (mut envia, recebe) = futures::channel::mpsc::channel(4);
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
             let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
             let mut linha = String::new();
             if BufReader::new(&s).take(64 * 1024).read_line(&mut linha).is_ok() {
-                if let Some(p) = linha.trim().strip_prefix(PREFIXO) {
+                if let Some(p) = linha.trim().strip_prefix(prefixo.as_str()) {
                     let p = if substituido() { "trocar" } else { p };
                     let _ = writeln!(&s, "{}", if p == "trocar" { "trocar" } else { "ok" });
                     if futures::executor::block_on(futures::SinkExt::send(&mut envia, p.to_owned())).is_err() {
@@ -88,10 +117,13 @@ mod testes {
     fn pedido_atravessa_a_porta() {
         let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let porta = l.local_addr().unwrap().port();
-        let mut fluxo = Box::pin(pedidos(l));
+        let mut fluxo = Box::pin(pedidos(l, "s3nha".into()));
         let mandar = |t: &str| writeln!(TcpStream::connect((Ipv4Addr::LOCALHOST, porta)).unwrap(), "{t}").unwrap();
         mandar("GET / HTTP/1.1");
-        mandar("feathernotes postit");
+        // Sem a senha (outro programa, outro usuário): não vira pedido.
+        mandar("feathernotes trocar");
+        mandar("feathernotes errada trocar");
+        mandar("feathernotes s3nha postit");
         assert_eq!(futures::executor::block_on(futures::StreamExt::next(&mut fluxo)), Some("postit".to_string()));
     }
 
@@ -102,7 +134,11 @@ mod testes {
         let arquivo = crate::arquivo::arquivo_porta();
         std::fs::create_dir_all(arquivo.parent().unwrap()).unwrap();
         crate::arquivo::gravar(&arquivo, outro.local_addr().unwrap().port().to_string().as_bytes()).unwrap();
-        let Inicio::Primeiro(Some(l)) = iniciar("postit") else { panic!("devia virar o primeiro") };
+        let Inicio::Primeiro(Some((l, senha))) = iniciar("postit") else { panic!("devia virar o primeiro") };
+        let anotado = std::fs::read_to_string(&arquivo).unwrap();
+        assert!(anotado.ends_with(&senha) && senha.len() == 32, "a porta e a senha ficam anotadas");
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&arquivo).unwrap().permissions()) & 0o777, 0o600);
         // Uma versão antiga lê o pedido e fecha sem responder: conta como entregue.
         let antigo = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         crate::arquivo::gravar(&arquivo, antigo.local_addr().unwrap().port().to_string().as_bytes()).unwrap();
@@ -112,9 +148,9 @@ mod testes {
         });
         assert!(matches!(iniciar("mostrar"), Inicio::Entregue));
         fecha.join().unwrap();
-        crate::arquivo::gravar(&arquivo, l.local_addr().unwrap().port().to_string().as_bytes()).unwrap();
+        crate::arquivo::gravar(&arquivo, anotado.as_bytes()).unwrap();
         // Agora a porta é a de um FeatherNotes de verdade: ele responde e o pedido chega.
-        let mut fluxo = Box::pin(pedidos(l));
+        let mut fluxo = Box::pin(pedidos(l, senha));
         assert!(matches!(iniciar("mostrar"), Inicio::Entregue));
         assert_eq!(futures::executor::block_on(futures::StreamExt::next(&mut fluxo)), Some("mostrar".to_string()));
         // O aberto é de antes de uma atualização: responde "trocar" e sai; o novo vira o primeiro.
