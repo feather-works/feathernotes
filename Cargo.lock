@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "feathernotes"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chardetng",
  "dirs 6.0.0",
@@ -2520,8 +2520,8 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pelicano"
-version = "0.1.12"
-source = "git+https://github.com/feather-works/pelicano?tag=v0.1.12#7b88c7238145ccd34c9b1c613a0608b611fcc473"
+version = "0.1.13"
+source = "git+https://github.com/feather-works/pelicano?tag=v0.1.13#daed8f43cb4a05ac3cb46bda6f8ea20e21b10ab1"
 dependencies = [
  "accesskit",
  "accesskit_winit",
