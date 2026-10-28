@@ -212,6 +212,7 @@ enum Msg {
     Medir,
     Fonte_(Fonte),
     Propriedades,
+    Atualizar,
     IrPara,
     Linha(String),
     IrParaLinha,
@@ -1336,6 +1337,7 @@ impl Notas {
                 item("Ir para a linha…", "Ctrl+G", Some(Msg::IrPara)),
                 item("Propriedades do arquivo", "Alt+Enter", Some(Msg::Propriedades)),
                 item("Tela cheia", "F11", Some(Msg::TelaCheia)),
+                item("Procurar atualizações", "", Some(Msg::Atualizar)),
                 item("Sair", "Ctrl+Q", Some(Msg::Sair)),
                 separador(),
                 tipo,
@@ -1603,6 +1605,13 @@ impl App for Notas {
                     self.conteudo().go_to_line(n);
                 }
                 self.foco += 1;
+            }
+            Msg::Atualizar => {
+                self.menu = false;
+                // shortcut: não baixa nada sozinho; abre o launcher (ele atualiza) ou a página da última versão. Baixar e instalar aqui quando o Notes puder usar a rede.
+                if std::process::Command::new("featherlauncher").spawn().is_err() {
+                    let _ = abrir_no_sistema("https://github.com/feather-works/feathernotes/releases/latest");
+                }
             }
             Msg::Propriedades => {
                 self.menu = false;
