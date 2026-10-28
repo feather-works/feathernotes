@@ -1,28 +1,28 @@
 # FeatherNotes
 
-Bloco de notas leve da suíte FeatherWorks, feito em Rust com o [pelicano](https://github.com/feather-works/pelicano).
+Lightweight notepad from the FeatherWorks suite, written in Rust with [pelicano](https://github.com/feather-works/pelicano).
 
-- Abas que voltam como estavam, com o que não foi salvo
-- Localizar e substituir, ir para a linha, zoom com Ctrl+roda
-- Markdown com os sinais escondidos, barra de formatação e tarefas clicáveis
-- Mais de 30 codificações, detecção automática e conserto de acentos quebrados
-- Caracteres invisíveis à mostra
-- Post-its soltos na área de trabalho: cores, alfinete no fundo da tela, lista com lixeira
-- Atalho do sistema para novo post-it (Super+Alt+N, no GNOME) e abrir junto com o sistema
+- Tabs that come back as you left them, unsaved changes included
+- Find and replace, go to line, Ctrl+wheel zoom
+- Markdown with hidden markup, formatting bar and clickable tasks
+- 30+ encodings, automatic detection and repair of broken accents
+- Show invisible characters
+- Sticky notes on the desktop: colors, pin to the background, list with trash
+- System shortcut for a new sticky note (Super+Alt+N on GNOME) and start with the system
 
-## Instalar
+## Install
 
-Baixe da [última versão](https://github.com/feather-works/feathernotes/releases/latest) ou instale pelo FeatherWorks Launcher:
+Download the [latest release](https://github.com/feather-works/feathernotes/releases/latest) or install it with the FeatherWorks Launcher:
 
-- Linux: `feathernotes-linux-amd64.deb`, ou o `.tar.gz` e rode `instalar.sh`
+- Linux: `feathernotes-linux-amd64.deb`, or the `.tar.gz` and run `instalar.sh`
 - Windows: `FeatherNotes-windows-x64.exe`
 
-## Compilar
+## Build
 
 ```bash
 cargo run --release
 cargo test
-pacote/gerar.sh   # os instaladores, em pacote/saida/
+pacote/gerar.sh   # installers, in pacote/saida/
 ```
 
-Licença GPL-3.0.
+License: GPL-3.0.
