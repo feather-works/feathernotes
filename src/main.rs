@@ -16,6 +16,8 @@ use std::time::Duration;
 
 const RAIO_JANELA: f32 = 10.0;
 const ALTURA_BARRA: f32 = 44.0;
+/// Abaixo desta largura a janela fica compacta: sem o nome do app e sem os números das linhas.
+const LARGURA_COMPACTA: f32 = 560.0;
 const TAMANHO_JANELA: Size = Size::new(980.0, 680.0);
 const SEM_TITULO: &str = "Sem título.txt";
 const TAMANHO_PADRAO: f32 = 15.0;
@@ -1083,8 +1085,9 @@ impl Notas {
         let arrastar = |e: Element<'static, Msg>| mouse_area(e).on_press(Msg::Arrastar).on_double_click(Msg::Maximizar);
         let botao = |icone, m, fechar| button(container(traco(icone, 15.0, c.texto)).center()).on_press(m).width(42.0).height(32.0).padding(0.0).style(plano(c, fechar));
         row![
-            arrastar(nome.into()),
-            self.abas(c),
+            arrastar(if self.compacta() { Space::new(8.0, ALTURA_BARRA).into() } else { nome.into() }),
+            // Abas demais são cortadas: os botões da janela nunca saem da tela.
+            container(self.abas(c)).max_width(self.espaco_abas()).clip(true),
             arrastar(Space::new(Length::FILL, ALTURA_BARRA).into()),
             row![botao(ICONE_INFO, Msg::Propriedades, false), botao(ICONE_MENU, Msg::Menu, false), botao(ICONE_MINIMIZAR, Msg::Minimizar, false), botao(ICONE_MAXIMIZAR, Msg::Maximizar, false), botao(ICONE_X, Msg::Fechar, true)].spacing(2).padding(Padding { right: 8.0, ..Padding::ZERO }),
         ]
@@ -1092,10 +1095,18 @@ impl Notas {
         .into()
     }
 
+    fn compacta(&self) -> bool {
+        self.largura < LARGURA_COMPACTA
+    }
+
+    /// O que sobra para as abas e o "+" ao lado da marca, dos botões e de um pouco de arrastar.
+    fn espaco_abas(&self) -> f32 {
+        (self.largura - if self.compacta() { 8.0 } else { 175.0 } - 230.0 - 24.0).max(0.0)
+    }
+
     fn abas(&self, c: Cores) -> Element<'_, Msg> {
         let mut linha = row![].spacing(4).align(Align::End);
-        // As abas encolhem para caber ao lado da marca e dos botões (uns 420 px).
-        let largura = ((self.largura - 460.0) / self.abas.len() as f32 - 4.0).clamp(90.0, 190.0);
+        let largura = ((self.espaco_abas() - 40.0) / self.abas.len() as f32 - 4.0).clamp(56.0, 190.0);
         for (i, aba) in self.abas.iter().enumerate() {
             let ativa = i == self.ativa;
             // Alterada: um ponto no lugar do ×, como nos editores de código.
@@ -2013,7 +2024,7 @@ impl App for Notas {
                 Fonte::Serif => Font::SERIF,
             })
             .wrap(self.prefs.quebra)
-            .line_numbers(true)
+            .line_numbers(!self.compacta())
             .padding(Padding { top: 14.0, right: 16.0, bottom: 8.0, left: 22.0 })
             .on_change(Msg::Mudou)
             .autofocus(self.foco)
