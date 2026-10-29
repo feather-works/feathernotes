@@ -174,6 +174,21 @@ mod testes {
     }
 
     #[test]
+    fn acha_os_o_cirilicos_no_google() {
+        // Os dois "о" são cirílicos (U+043E).
+        let s = procurar("https://g\u{43e}\u{43e}gle.com/");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].palavra, "g\u{43e}\u{43e}gle");
+        assert!(s[0].dica.contains("CYRILLIC SMALL LETTER O (U+043E) no lugar de o"), "{}", s[0].dica);
+        assert!(s[0].dica.contains("Endereço real: xn--"), "{}", s[0].dica);
+        assert!(palavras("https://google.com/").is_empty());
+        // No e-mail também: no domínio e no nome antes do @.
+        assert_eq!(palavras("De: Banco <alerta@g\u{43e}\u{43e}gle.com>"), vec!["g\u{43e}\u{43e}gle"]);
+        assert_eq!(palavras("mailto:p\u{430}ypal@gmail.com"), vec!["p\u{430}ypal"]);
+        assert!(palavras("suporte@google.com").is_empty());
+    }
+
+    #[test]
     fn grego_que_imita_avisa_e_matematica_nao() {
         assert_eq!(palavras("gοogle.com e gοogle.com"), vec!["gοogle", "gοogle"]);
         assert!(procurar("gοogle")[0].resumo.starts_with("ο grego (U+03BF) no lugar de o"));

@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "feathernotes"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chardetng",
  "dirs 6.0.0",
