@@ -6,6 +6,7 @@ mod arquivo;
 mod codificacao;
 mod consumo;
 mod instancia;
+mod json;
 
 use arquivo::{AbaSalva, Fonte, PostItSalvo, Preferencias, Tema};
 use codificacao::Cod;
@@ -111,12 +112,15 @@ struct Aba {
     converter: bool,
     /// Mostra o Markdown formatado (ligado sozinho em .md).
     markdown: bool,
+    /// A barra do JSON (formatar, compactar, ordenar, validar). Ligada sozinha em .json.
+    json: bool,
 }
 
 impl Aba {
     fn nova(id: u64, caminho: Option<PathBuf>) -> Self {
         let markdown = caminho.as_deref().is_some_and(eh_markdown);
-        Aba { id, caminho, conteudo: None, salvo: Some(0), copiado: 0, cod: Cod::Utf8, cod_salva: None, quebra: Quebra::Lf, acentos_quebrados: false, converter: false, markdown }
+        let json = caminho.as_deref().is_some_and(eh_json);
+        Aba { id, caminho, conteudo: None, salvo: Some(0), copiado: 0, cod: Cod::Utf8, cod_salva: None, quebra: Quebra::Lf, acentos_quebrados: false, converter: false, markdown, json }
     }
     fn nome(&self) -> String {
         self.caminho.as_ref().and_then(|p| p.file_name()).map_or(SEM_TITULO.into(), |n| n.to_string_lossy().into_owned())
@@ -193,6 +197,8 @@ struct Notas {
     suspeitas: std::cell::RefCell<Option<((u64, u64), Vec<alfabeto::Suspeita>)>>,
     /// ((aba, versão), [linhas, palavras, caracteres sem espaço, todos]) do painel de propriedades.
     estatisticas: std::cell::RefCell<Option<((u64, u64), [usize; 4])>>,
+    /// ((aba, versão), o erro do JSON ou `None` se válido), só com a barra do JSON.
+    erro_json: std::cell::RefCell<Option<((u64, u64), Option<json::Erro>)>>,
     postits: Vec<PostIt>,
     /// A lista de post-its à direita (no lugar das propriedades).
     painel_postits: bool,
@@ -220,6 +226,11 @@ enum Msg {
     IrParaLinha,
     Invisiveis,
     Markdown(bool),
+    Json(bool),
+    /// Reescreve o JSON da aba: (compacto, ordenar as chaves).
+    ArrumarJson(bool, bool),
+    /// Leva o cursor à linha (o erro do JSON).
+    IrALinha(usize),
     Formatar(Formato),
     ProximoOculto,
     ProximaSuspeita,
@@ -348,7 +359,7 @@ impl Notas {
             abas.push(Aba::nova(proximo_id, None));
         }
         let escuro = escuro(prefs.tema);
-        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: cfg!(target_os = "linux") && arquivo::tem_atalho_postit() };
+        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: cfg!(target_os = "linux") && arquivo::tem_atalho_postit() };
         n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0 }).collect();
         n.carregar(n.ativa);
         n
@@ -363,6 +374,7 @@ impl Notas {
         // Todo texto novo começa na versão 0: a contagem guardada pode ser da aba que estava no lugar.
         self.estatisticas.take();
         self.ocultos.take();
+        self.erro_json.take();
         self.suspeitas.take();
         let copia = arquivo::recuperacao(aba.id);
         let original = aba.caminho.as_ref().map(std::fs::read);
@@ -682,6 +694,7 @@ impl Notas {
                 aba.salvo = Some(c.version());
                 if aba.caminho.as_ref() != Some(&caminho) {
                     aba.markdown = eh_markdown(&caminho);
+                    aba.json = eh_json(&caminho);
                 }
                 aba.caminho = Some(caminho);
                 self.aviso = Some("Salvo".into());
@@ -745,6 +758,7 @@ impl Notas {
                 aba.converter = false;
                 self.estatisticas.take();
                 self.ocultos.take();
+                self.erro_json.take();
                 self.suspeitas.take();
                 self.aviso = ruim.then(|| format!("Alguns bytes não fazem sentido em {}: viraram �", cod.nome()));
             }
@@ -767,6 +781,10 @@ fn abrir_no_sistema(alvo: impl AsRef<std::ffi::OsStr>) -> std::io::Result<std::p
 
 fn eh_markdown(p: &std::path::Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+}
+
+fn eh_json(p: &std::path::Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("json"))
 }
 
 fn escuro(t: Tema) -> bool {
@@ -933,7 +951,19 @@ fn formatar(c: &Content, f: Formato) {
         Formato::Negrito => c.wrap_selection("**", "**", prefixo),
         Formato::Italico => c.wrap_selection("*", "*", prefixo),
         Formato::Tachado => c.wrap_selection("~~", "~~", prefixo),
-        Formato::Codigo => c.wrap_selection("`", "`", prefixo),
+        // Trecho dentro de uma linha: `código`; várias linhas ou nada selecionado: um bloco ```.
+        Formato::Codigo => {
+            let sel = c.selection().unwrap_or_default();
+            if !sel.is_empty() && !sel.contains('\n') {
+                return c.wrap_selection("`", "`", prefixo);
+            }
+            // O bloco começa numa linha nova; vazio, o cursor fica dentro dele.
+            let vazia = sel.is_empty() && c.line(c.cursor().0).is_none_or(|l| l.trim().is_empty());
+            c.insert(&format!("{}```\n{}\n```\n", if vazia || !sel.is_empty() { "" } else { "\n" }, sel.trim_end_matches('\n')));
+            if sel.is_empty() {
+                c.go_to_line(c.cursor().0 - 2);
+            }
+        }
         Formato::Link => c.wrap_selection("[", "](https://)", prefixo),
         Formato::Titulo(n) => c.edit_lines(linha(format!("{} ", "#".repeat(n)))),
         Formato::Lista => c.edit_lines(linha("- ".into())),
@@ -1218,6 +1248,40 @@ impl Notas {
         Some(container(linha).width(Length::FILL).style(caixa(c.papel, Border::default())).into())
     }
 
+    /// A barra do JSON: arrumar o texto e, à direita, se ele é válido (clicar no erro leva à linha).
+    fn barra_json(&self, c: Cores) -> Option<Element<'_, Msg>> {
+        let aba = &self.abas[self.ativa];
+        if !aba.json {
+            return None;
+        }
+        let conteudo = self.conteudo();
+        let chave = (aba.id, conteudo.version());
+        let mut cache = self.erro_json.borrow_mut();
+        if cache.as_ref().is_none_or(|(k, _)| *k != chave) {
+            *cache = Some((chave, json::validar(&conteudo.text()).err()));
+        }
+        let b = |rotulo: &'static str, m: Msg, dica: &'static str| tooltip(button(text(rotulo).size(13).color(c.texto)).on_press(m).padding([5u16, 10]).style(plano(c, false)), dica, TooltipPosition::Bottom);
+        let estado: Element<'_, Msg> = match cache.as_ref().and_then(|(_, e)| e.as_ref()) {
+            None => text("JSON válido").size(12).color(Color::rgb8(0x2e, 0xa0, 0x43)).into(),
+            Some(e) => button(text(format!("Linha {}, coluna {}: {}", e.linha, e.coluna, e.motivo)).size(12).color(Color::rgb8(0xe8, 0x71, 0x0a)))
+                .on_press(Msg::IrALinha(e.linha))
+                .padding([3u16, 8])
+                .style(plano(c, false))
+                .into(),
+        };
+        let linha = row![
+            b("Formatar", Msg::ArrumarJson(false, false), "Recuo de 2 espaços, um item por linha"),
+            b("Compactar", Msg::ArrumarJson(true, false), "Tudo numa linha, sem espaços"),
+            b("Ordenar chaves", Msg::ArrumarJson(false, true), "Formata e põe as chaves de cada objeto em ordem alfabética"),
+            horizontal_space(),
+            estado,
+        ]
+        .spacing(2)
+        .align(Align::Center)
+        .padding([4u16, 14]);
+        Some(container(linha).width(Length::FILL).style(caixa(c.papel, Border::default())).into())
+    }
+
     fn rodape(&self, c: Cores) -> Element<'_, Msg> {
         let (ln, col) = self.conteudo().cursor();
         let aba = &self.abas[self.ativa];
@@ -1261,7 +1325,11 @@ impl Notas {
             .push_maybe(aba.acentos_quebrados.then(|| button(text("Acentos quebrados (Ã£)? Consertar").size(12).color(Color::rgb8(0xe8, 0x71, 0x0a))).on_press(Msg::ConsertarAcentos).padding([3u16, 8]).style(plano(c, false))))
             .push(clicavel(aba.cod.nome().into(), Msg::MenuCod(Some(false))))
             .push(clicavel(aba.quebra.nome().into(), Msg::Propriedades))
-            .push(clicavel((if aba.markdown { "Markdown" } else { "Texto Simples" }).into(), Msg::Markdown(!aba.markdown)))
+            .push(match (aba.markdown, aba.json) {
+                (_, true) => clicavel("JSON".into(), Msg::Json(false)),
+                (true, _) => clicavel("Markdown".into(), Msg::Json(true)),
+                _ => clicavel("Texto Simples".into(), Msg::Markdown(true)),
+            })
             .spacing(16)
             .align(Align::Center)
             .padding([0u16, 10])
@@ -1428,9 +1496,6 @@ impl Notas {
         let campo = |titulo: &'static str, valor: String| column![text(titulo).size(11).color(c.mudo), text(valor).size(13).color(c.texto)].spacing(3).padding([10u16, 14]).width(Length::FILL);
         let linha = || container(Space::new(Length::FILL, 1.0)).style(caixa(c.borda, Border::default()));
         let cartao = |filhos: Vec<Element<'static, Msg>>| container(column(filhos)).width(Length::FILL).style(caixa(c.papel, Border::rounded(10.0).color(c.borda, 1.0)));
-        let escolha = |titulo: &'static str, a: &'static str, b: &'static str, em_b: bool, m: fn(bool) -> Msg| {
-            row![text(titulo).size(13).color(c.texto), horizontal_space(), pilula(c, a, !em_b, m(false)), pilula(c, b, em_b, m(true))].spacing(4).align(Align::Center).padding([10u16, 14])
-        };
         let local = aba.caminho.as_ref().and_then(|p| p.parent()).map_or("Ainda não salvo".into(), |p| p.display().to_string());
         let pasta = aba.caminho.is_some().then(|| tooltip(button(container(traco(ICONE_PASTA, 16.0, c.texto)).center()).on_press(Msg::AbrirPasta).width(30.0).height(30.0).padding(0.0).style(plano(c, false)), "Abrir a pasta", TooltipPosition::Bottom));
         let arquivo = cartao(vec![
@@ -1438,7 +1503,17 @@ impl Notas {
             linha().into(),
             row![campo("Local", local)].push_maybe(pasta).align(Align::Center).padding(Padding { right: 8.0, ..Padding::ZERO }).into(),
             linha().into(),
-            escolha("Tipo", "Texto simples", "Markdown", aba.markdown, Msg::Markdown).into(),
+            row![
+                text("Tipo").size(13).color(c.texto),
+                horizontal_space(),
+                pilula(c, "Texto simples", !aba.markdown && !aba.json, Msg::Markdown(false)),
+                pilula(c, "Markdown", aba.markdown, Msg::Markdown(true)),
+                pilula(c, "JSON", aba.json, Msg::Json(true)),
+            ]
+            .spacing(4)
+            .align(Align::Center)
+            .padding([10u16, 14])
+            .into(),
             linha().into(),
             row![
                 text("Codificação").size(13).color(c.texto),
@@ -1585,8 +1660,35 @@ impl App for Notas {
             }
             Msg::Fonte_(f) => self.mudar_prefs(|p| p.fonte = f),
             Msg::Markdown(m) => {
-                self.abas[self.ativa].markdown = m;
+                let aba = &mut self.abas[self.ativa];
+                aba.markdown = m;
+                aba.json = false;
                 self.guardar_sessao();
+            }
+            Msg::Json(j) => {
+                let aba = &mut self.abas[self.ativa];
+                aba.json = j;
+                aba.markdown &= !j;
+            }
+            Msg::IrALinha(n) => {
+                self.conteudo().go_to_line(n);
+                self.foco += 1;
+            }
+            Msg::ArrumarJson(compacto, ordenar) => {
+                let aba = &mut self.abas[self.ativa];
+                let Some(c) = &aba.conteudo else { return Task::none() };
+                match json::reescrever(&c.text(), compacto, ordenar) {
+                    Ok(novo) => {
+                        c.set_text(&novo);
+                        self.foco += 1;
+                        return self.mudou();
+                    }
+                    Err(e) => {
+                        c.go_to_line(e.linha);
+                        self.foco += 1;
+                        self.aviso = Some(format!("JSON inválido na linha {}: {}", e.linha, e.motivo));
+                    }
+                }
             }
             Msg::Formatar(f) => {
                 formatar(self.conteudo(), f);
@@ -1718,7 +1820,7 @@ impl App for Notas {
                 let pasta = self.abas[self.ativa].caminho.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(dirs::document_dir);
                 return Task::perform(
                     async move {
-                        let mut d = rfd::AsyncFileDialog::new().add_filter("Texto", &["txt", "md", "log", "csv", "ini", "conf"]).add_filter("Todos os arquivos", &["*"]);
+                        let mut d = rfd::AsyncFileDialog::new().add_filter("Texto", &["txt", "md", "json", "log", "csv", "ini", "conf"]).add_filter("Todos os arquivos", &["*"]);
                         if let Some(p) = pasta {
                             d = d.set_directory(p);
                         }
@@ -2033,9 +2135,20 @@ impl App for Notas {
             .on_link(Msg::AbrirLink)
             .markdown(self.abas[self.ativa].markdown)
             .style(move |_, _| Style::default().background(c.papel).text_color(c.texto));
+        // JSON em três cores: chave, valor e os sinais.
+        let valor = Color::hex(if self.escuro { "#7ec699" } else { "#1a7f37" }).expect("cor");
+        let editor = if self.abas[self.ativa].json {
+            editor.colors(move |linha| json::papeis(linha).into_iter().map(|(r, p)| (r, match p {
+                json::Papel::Chave => c.acento,
+                json::Papel::Valor => valor,
+                json::Papel::Sinal => c.mudo,
+            })).collect())
+        } else {
+            editor
+        };
         let topo = container(self.barra(c)).width(Length::FILL).style(move |_| Style::default().background(c.barra).backdrop_blur(20.0));
         let linha = || container(Space::new(Length::FILL, 1.0)).style(caixa(c.borda, Border::default()));
-        let meio = row![column![].push_maybe(self.formatos(c)).push(editor).width(Length::FILL).height(Length::FILL)].push_maybe(if self.painel_postits { Some(self.lista_postits(c)) } else { self.propriedades.then(|| self.propriedades(c)) }).height(Length::FILL);
+        let meio = row![column![].push_maybe(self.formatos(c)).push_maybe(self.barra_json(c)).push(editor).width(Length::FILL).height(Length::FILL)].push_maybe(if self.painel_postits { Some(self.lista_postits(c)) } else { self.propriedades.then(|| self.propriedades(c)) }).height(Length::FILL);
         let corpo = column![topo, meio, linha(), self.rodape(c)];
         let mut camadas = stack![corpo, self.alcas()];
         if let Some(b) = self.ir_para(c).or_else(|| self.busca(c)) {
@@ -2081,6 +2194,30 @@ mod testes {
         c.find_next(" ## oi", true);
         formatar(&c, Formato::Tachado);
         assert_eq!(c.text(), " ## ~~oi~~");
+    }
+
+    #[test]
+    fn codigo_vira_bloco_de_tres_crases() {
+        let montar = |t: &str| {
+            let c = Content::with_text(t);
+            capture(&text_editor::<Msg>(&c).into(), Size::new(300.0, 100.0), 1.0, &Theme::light(), &mut Renderer::new(), None);
+            c
+        };
+        // Sem seleção, numa linha vazia: o bloco, com o cursor dentro.
+        let c = montar("");
+        formatar(&c, Formato::Codigo);
+        assert_eq!((c.text().as_str(), c.cursor()), ("```\n\n```\n", (2, 1)));
+        // Numa linha com texto, o bloco vai para a linha de baixo.
+        let c = montar("oi");
+        c.go_to_line(1);
+        c.find_next("oi", true);
+        formatar(&c, Formato::Codigo);
+        assert_eq!(c.text(), "`oi`");
+        let c = montar("oi");
+        c.find_next("oi", true);
+        c.insert("oi");
+        formatar(&c, Formato::Codigo);
+        assert_eq!((c.text().as_str(), c.cursor().0), ("oi\n```\n\n```\n", 3));
     }
 
     #[test]
@@ -2181,7 +2318,7 @@ mod testes {
             n.prefs.invisiveis = true;
             // Texto fixo: o teste não depende da sessão de quem roda.
             n.abas[n.ativa].markdown = true;
-            n.abas[n.ativa].conteudo = Some(Content::with_text("Olá mundo\tcom tab\nZWSP aqui:\u{200b}x e NBSP:\u{a0}y\n# Título\n## Subtítulo\n**negrito**, *itálico*, ~~tachado~~ e `código`\n- [ ] tarefa\n- [x] feita\n1. item\n> citação\n[link](https://x.y)\n| a | b |\n|---|---|\n"));
+            n.abas[n.ativa].conteudo = Some(Content::with_text("Olá mundo\tcom tab\nZWSP aqui:\u{200b}x e NBSP:\u{a0}y\n# Título\n## Subtítulo\n**negrito**, *itálico*, ~~tachado~~ e `código`\n- [ ] tarefa\n- [x] feita\n1. item\n> citação\n[link](https://x.y)\n| a | b |\n|---|---|\n\n```text\nfeatherslide-gui\n    |-> feather-ui -> iced\n```\n"));
             n.confirmar = Some(n.abas[0].id);
             n.propriedades = true;
             let png = capture(&n.view(), Size::new(980.0, 680.0), 1.0, &n.theme(), &mut Renderer::new(), None);
@@ -2218,6 +2355,21 @@ mod testes {
                 n.menu_cod = Some(false);
                 n.propriedades = true;
                 std::fs::write(PathBuf::from(&d).join(format!("limpa-{escuro}.png")), capture(&n.view(), Size::new(980.0, 680.0), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
+            }
+            // A barra do JSON, com um erro e depois formatado.
+            n.update(Msg::Json(true));
+            n.abas[n.ativa].conteudo = Some(Content::with_text("{\"b\": [1, 2], \"a\": {\"c\": true},}"));
+            let erro = capture(&n.view(), Size::new(980.0, 680.0), 1.0, &n.theme(), &mut Renderer::new(), None);
+            let _ = n.update(Msg::ArrumarJson(false, true));
+            assert!(n.abas[n.ativa].conteudo.as_ref().unwrap().text().starts_with('{'));
+            n.abas[n.ativa].conteudo = Some(Content::with_text("{\"b\": [1, 2], \"a\": {\"c\": true}}"));
+            let _ = n.update(Msg::ArrumarJson(false, true));
+            assert_eq!(n.abas[n.ativa].conteudo.as_ref().unwrap().text(), "{\n  \"a\": {\n    \"c\": true\n  },\n  \"b\": [\n    1,\n    2\n  ]\n}\n");
+            assert!(n.abas[n.ativa].alterada());
+            assert!(n.barra_json(n.cores()).is_some() && n.erro_json.borrow().as_ref().is_some_and(|(_, e)| e.is_none()));
+            if let Some(d) = std::env::var_os("FEATHERNOTES_CAPTURAR") {
+                std::fs::write(PathBuf::from(&d).join(format!("json-erro-{escuro}.png")), erro).unwrap();
+                std::fs::write(PathBuf::from(&d).join(format!("json-{escuro}.png")), capture(&n.view(), Size::new(980.0, 680.0), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
             }
         }
     }
