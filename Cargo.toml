@@ -1,6 +1,6 @@
 [package]
 name = "feathernotes"
-version = "0.1.10"
+version = "0.1.11"
 description = "Bloco de notas simples da suíte FeatherWorks"
 authors = ["FeatherWorks"]
 edition = "2021"
