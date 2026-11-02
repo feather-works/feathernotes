@@ -75,10 +75,10 @@ fn main() -> Result<(), Error> {
     let postit = std::env::args().any(|a| a == "--postit");
     // `--fundo`: o início com o sistema; só os post-its que estavam abertos aparecem.
     let fundo = std::env::args().any(|a| a == "--fundo");
-    // Os arquivos do "Abrir com" (o %F do .desktop); a linha do pedido não comporta quebra no nome.
-    let arquivos: Vec<PathBuf> = std::env::args_os().skip(1).filter(|a| !a.to_string_lossy().starts_with("--")).filter_map(|a| std::path::absolute(a).ok()).filter(|p| !p.to_string_lossy().contains(['\n', '\0'])).collect();
+    // Os arquivos do "Abrir com" (o %F do .desktop).
+    let arquivos: Vec<PathBuf> = std::env::args_os().skip(1).filter(|a| !a.to_string_lossy().starts_with("--")).filter_map(|a| std::path::absolute(a).ok()).collect();
     let pedido = if !arquivos.is_empty() {
-        arquivos.iter().fold("abrir".to_string(), |s, p| format!("{s}\0{}", p.display()))
+        arquivos.iter().fold("abrirx".to_string(), |s, p| format!("{s}\0{}", instancia::caminho_em_hex(p)))
     } else if postit {
         "postit".into()
     } else {
@@ -139,13 +139,15 @@ struct Aba {
     markdown: bool,
     /// A barra do JSON (formatar, compactar, ordenar, validar). Ligada sozinha em .json.
     json: bool,
+    /// Fechada (só na sessão): tem cópia de recuperação. Visto uma vez ao abrir o app, não a cada quadro.
+    copia: bool,
 }
 
 impl Aba {
     fn nova(id: u64, caminho: Option<PathBuf>) -> Self {
         let markdown = caminho.as_deref().is_some_and(eh_markdown);
         let json = caminho.as_deref().is_some_and(eh_json);
-        Aba { id, caminho, conteudo: None, salvo: Some(0), copiado: 0, cod: Cod::Utf8, cod_salva: None, quebra: Quebra::Lf, acentos_quebrados: false, converter: false, markdown, json }
+        Aba { id, caminho, conteudo: None, salvo: Some(0), copiado: 0, cod: Cod::Utf8, cod_salva: None, quebra: Quebra::Lf, acentos_quebrados: false, converter: false, markdown, json, copia: false }
     }
     fn nome(&self) -> String {
         self.caminho.as_ref().and_then(|p| p.file_name()).map_or(SEM_TITULO.into(), |n| n.to_string_lossy().into_owned())
@@ -154,7 +156,7 @@ impl Aba {
     fn alterada(&self) -> bool {
         match &self.conteudo {
             Some(c) => self.salvo != Some(c.version()),
-            None => arquivo::recuperacao(self.id).exists(),
+            None => self.copia,
         }
     }
 }
@@ -217,13 +219,13 @@ struct Notas {
     /// Sobe a cada painel que abre ou fecha: o campo dele (ou o editor, ao fechar) pega a próxima tecla.
     foco: u64,
     /// ((aba, versão), quantos ocultos): contar o texto só quando ele muda.
-    ocultos: std::cell::RefCell<Option<((u64, u64), usize)>>,
+    ocultos: Lembrado<usize>,
     /// ((aba, versão), palavras de link falso), também só quando o texto muda.
-    suspeitas: std::cell::RefCell<Option<((u64, u64), Vec<alfabeto::Suspeita>)>>,
+    suspeitas: Lembrado<Vec<alfabeto::Suspeita>>,
     /// ((aba, versão), [linhas, palavras, caracteres sem espaço, todos]) do painel de propriedades.
-    estatisticas: std::cell::RefCell<Option<((u64, u64), [usize; 4])>>,
+    estatisticas: Lembrado<[usize; 4]>,
     /// ((aba, versão), o erro do JSON ou `None` se válido), só com a barra do JSON.
-    erro_json: std::cell::RefCell<Option<((u64, u64), Option<json::Erro>)>>,
+    erro_json: Lembrado<Option<json::Erro>>,
     postits: Vec<PostIt>,
     /// A lista de post-its à direita (no lugar das propriedades).
     painel_postits: bool,
@@ -384,7 +386,7 @@ impl Notas {
     fn novo() -> Self {
         let prefs = arquivo::ler_preferencias();
         let (ativa, salvas) = arquivo::ler_sessao();
-        let mut abas: Vec<Aba> = salvas.into_iter().map(|AbaSalva { id, caminho, markdown, cod, quebra }| Aba { markdown: markdown || caminho.as_deref().is_some_and(eh_markdown), cod_salva: cod, quebra: quebra.unwrap_or(Quebra::Lf), converter: quebra.is_some(), ..Aba::nova(id, caminho) }).collect();
+        let mut abas: Vec<Aba> = salvas.into_iter().map(|AbaSalva { id, caminho, markdown, json, cod, quebra }| Aba { markdown: markdown || caminho.as_deref().is_some_and(eh_markdown), json: json || caminho.as_deref().is_some_and(eh_json), cod_salva: cod, quebra: quebra.unwrap_or(Quebra::Lf), converter: quebra.is_some(), copia: arquivo::recuperacao(id).exists(), ..Aba::nova(id, caminho) }).collect();
         let proximo_id = abas.iter().map(|a| a.id + 1).max().unwrap_or(1);
         if abas.is_empty() {
             abas.push(Aba::nova(proximo_id, None));
@@ -398,15 +400,11 @@ impl Notas {
 
     /// Lê o texto da aba na primeira vez que ela aparece: a cópia de recuperação ou o arquivo.
     fn carregar(&mut self, i: usize) {
-        let aba = &mut self.abas[i];
-        if aba.conteudo.is_some() {
+        if self.abas[i].conteudo.is_some() {
             return;
         }
-        // Todo texto novo começa na versão 0: a contagem guardada pode ser da aba que estava no lugar.
-        self.estatisticas.take();
-        self.ocultos.take();
-        self.erro_json.take();
-        self.suspeitas.take();
+        self.esquecer_contagens();
+        let aba = &mut self.abas[i];
         let copia = arquivo::recuperacao(aba.id);
         let original = aba.caminho.as_ref().map(std::fs::read);
         let (texto, salvo) = if let Ok(bytes) = std::fs::read(&copia) {
@@ -453,25 +451,29 @@ impl Notas {
     /// As palavras da aba com letras disfarçadas (link falso), procuradas só quando o texto muda.
     fn suspeitas(&self) -> Vec<alfabeto::Suspeita> {
         let conteudo = self.conteudo();
-        let chave = (self.abas[self.ativa].id, conteudo.version());
-        let mut cache = self.suspeitas.borrow_mut();
-        match &*cache {
-            Some((k, lista)) if *k == chave => lista.clone(),
-            _ => {
-                // Só ASCII e acentos do latim: não há o que procurar, nem copia o texto.
-                let lista = if conteudo.count_chars(alfabeto::vale_procurar) > 0 { alfabeto::procurar(&conteudo.text()) } else { Vec::new() };
-                *cache = Some((chave, lista.clone()));
-                lista
-            }
-        }
+        // Só ASCII e acentos do latim: não há o que procurar, nem copia o texto.
+        lembrar(&self.suspeitas, self.chave(), || if conteudo.count_chars(alfabeto::vale_procurar) > 0 { alfabeto::procurar(&conteudo.text()) } else { Vec::new() })
+    }
+
+    /// (aba, versão do texto): a chave das contagens guardadas.
+    fn chave(&self) -> (u64, u64) {
+        (self.abas[self.ativa].id, self.conteudo().version())
+    }
+
+    /// Todo texto novo começa na versão 0: a contagem guardada pode ser da aba que estava no lugar.
+    fn esquecer_contagens(&self) {
+        self.estatisticas.take();
+        self.ocultos.take();
+        self.erro_json.take();
+        self.suspeitas.take();
     }
 
     /// As palavras suspeitas sem repetir, na ordem do texto.
-    fn palavras_suspeitas(&self) -> Vec<String> {
+    fn palavras_suspeitas(lista: &[alfabeto::Suspeita]) -> Vec<String> {
         let mut palavras: Vec<String> = Vec::new();
-        for s in self.suspeitas() {
+        for s in lista {
             if !palavras.contains(&s.palavra) {
-                palavras.push(s.palavra);
+                palavras.push(s.palavra.clone());
             }
         }
         palavras
@@ -518,7 +520,7 @@ impl Notas {
             }
         }
         self.guardar_postits();
-        let lista: Vec<AbaSalva> = self.abas.iter().map(|a| AbaSalva { id: a.id, caminho: a.caminho.clone(), markdown: a.markdown, cod: a.conteudo.as_ref().map_or(a.cod_salva, |_| Some(a.cod)), quebra: a.converter.then_some(a.quebra) }).collect();
+        let lista: Vec<AbaSalva> = self.abas.iter().map(|a| AbaSalva { id: a.id, caminho: a.caminho.clone(), markdown: a.markdown, json: a.json, cod: a.conteudo.as_ref().map_or(a.cod_salva, |_| Some(a.cod)), quebra: a.converter.then_some(a.quebra) }).collect();
         if let Err(e) = arquivo::gravar_sessao(self.ativa, &lista) {
             self.aviso = Some(format!("Não guardou a sessão: {e}"));
         }
@@ -794,10 +796,7 @@ impl Notas {
                 aba.conteudo = Some(Content::with_text(&texto));
                 aba.salvo = Some(0);
                 aba.converter = false;
-                self.estatisticas.take();
-                self.ocultos.take();
-                self.erro_json.take();
-                self.suspeitas.take();
+                self.esquecer_contagens();
                 self.aviso = ruim.then(|| format!("Alguns bytes não fazem sentido em {}: viraram �", cod.nome()));
             }
             Err(e) => self.aviso = Some(format!("Não abriu: {e}")),
@@ -808,6 +807,22 @@ impl Notas {
         f(&mut self.prefs);
         self.escuro = escuro(self.prefs.tema);
         arquivo::gravar_preferencias(&self.prefs);
+    }
+}
+
+/// Uma contagem guardada com a chave (aba, versão do texto).
+type Lembrado<T> = std::cell::RefCell<Option<((u64, u64), T)>>;
+
+/// O valor guardado para a `chave` (aba, versão); calcula de novo só quando o texto muda.
+fn lembrar<T: Clone>(cache: &Lembrado<T>, chave: (u64, u64), calcular: impl FnOnce() -> T) -> T {
+    let mut cache = cache.borrow_mut();
+    match &*cache {
+        Some((k, v)) if *k == chave => v.clone(),
+        _ => {
+            let v = calcular();
+            *cache = Some((chave, v.clone()));
+            v
+        }
     }
 }
 
@@ -934,6 +949,11 @@ fn pena(tamanho: f32) -> SvgView {
 
 fn caixa(cor: Color, borda: Border) -> impl Fn(&Theme) -> Style {
     move |_| Style::default().background(cor).border(borda)
+}
+
+/// Cartão que flutua sobre a janela (menus, painéis, perguntas): papel, borda e sombra.
+fn flutuante(c: Cores, raio: f32, sombra: f32, y: f32, blur: f32) -> impl Fn(&Theme) -> Style {
+    move |_| Style::default().background(c.papel).border(Border::rounded(raio).color(c.borda, 1.0)).shadow(Shadow { color: Color::BLACK.alpha(sombra), offset: Point::new(0.0, y), blur })
 }
 
 /// Botão sem fundo que acende ao passar o mouse.
@@ -1228,7 +1248,7 @@ impl Notas {
         )
         .padding(8.0)
         .width(440.0)
-        .style(move |_| Style::default().background(c.papel).border(Border::rounded(10.0).color(c.borda, 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.16), offset: Point::new(0.0, 6.0), blur: 18.0 }));
+        .style(flutuante(c, 10.0, 0.16, 6.0, 18.0));
         Some(container(painel).width(Length::FILL).align_x(Align::End).padding(Padding { top: ALTURA_BARRA + 8.0, right: 22.0, ..Padding::ZERO }).into())
     }
 
@@ -1248,7 +1268,7 @@ impl Notas {
         let painel = container(row![text("Ir para a linha").size(13).color(c.texto), campo, ir, fechar].spacing(8).align(Align::Center))
             .padding(8.0)
             .width(360.0)
-            .style(move |_| Style::default().background(c.papel).border(Border::rounded(10.0).color(c.borda, 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.16), offset: Point::new(0.0, 6.0), blur: 18.0 }));
+            .style(flutuante(c, 10.0, 0.16, 6.0, 18.0));
         Some(container(painel).width(Length::FILL).align_x(Align::End).padding(Padding { top: ALTURA_BARRA + 8.0, right: 22.0, ..Padding::ZERO }).into())
     }
 
@@ -1292,14 +1312,9 @@ impl Notas {
         if !aba.json {
             return None;
         }
-        let conteudo = self.conteudo();
-        let chave = (aba.id, conteudo.version());
-        let mut cache = self.erro_json.borrow_mut();
-        if cache.as_ref().is_none_or(|(k, _)| *k != chave) {
-            *cache = Some((chave, json::validar(&conteudo.text()).err()));
-        }
+        let erro = lembrar(&self.erro_json, self.chave(), || json::validar(&self.conteudo().text()).err());
         let b = |rotulo: &'static str, m: Msg, dica: &'static str| tooltip(button(text(rotulo).size(13).color(c.texto)).on_press(m).padding([5u16, 10]).style(plano(c, false)), dica, TooltipPosition::Bottom);
-        let estado: Element<'_, Msg> = match cache.as_ref().and_then(|(_, e)| e.as_ref()) {
+        let estado: Element<'_, Msg> = match erro {
             None => text("JSON válido").size(12).color(Color::rgb8(0x2e, 0xa0, 0x43)).into(),
             Some(e) => button(text(format!("Linha {}, coluna {}: {}", e.linha, e.coluna, e.motivo)).size(12).color(Color::rgb8(0xe8, 0x71, 0x0a)))
                 .on_press(Msg::IrALinha(e.linha))
@@ -1329,24 +1344,13 @@ impl Notas {
         let conteudo = self.conteudo();
         // Cursor sobre um oculto: o nome dele (o inspetor de quem não aparece).
         let sob_cursor = conteudo.char_at_cursor().filter(|&c| is_invisible(c)).map(|c| item(nome_oculto(c)));
-        let ocultos = self.prefs.invisiveis.then(|| {
-            let chave = (aba.id, conteudo.version());
-            let mut cache = self.ocultos.borrow_mut();
-            match *cache {
-                Some((k, n)) if k == chave => n,
-                _ => {
-                    let n = conteudo.count_chars(is_invisible);
-                    *cache = Some((chave, n));
-                    n
-                }
-            }
-        });
+        let ocultos = self.prefs.invisiveis.then(|| lembrar(&self.ocultos, self.chave(), || conteudo.count_chars(is_invisible)));
         let aviso_ocultos = ocultos.filter(|&n| n > 0).map(|n| {
             let rotulo = if n == 1 { "1 caractere oculto".to_string() } else { format!("{n} caracteres ocultos") };
             button(text(rotulo).size(12).color(Color::rgb8(0xe8, 0x71, 0x0a))).on_press(Msg::ProximoOculto).padding([3u16, 8]).style(plano(c, false))
         });
         let suspeitas = self.suspeitas();
-        let palavras = self.palavras_suspeitas().len();
+        let palavras = Self::palavras_suspeitas(&suspeitas).len();
         let aviso_suspeitas = (palavras > 0).then(|| {
             let rotulo = if palavras == 1 { "1 palavra suspeita".to_string() } else { format!("{palavras} palavras suspeitas") };
             button(text(rotulo).size(12).color(Color::rgb8(0xe8, 0x71, 0x0a))).on_press(Msg::ProximaSuspeita).padding([3u16, 8]).style(plano(c, false))
@@ -1467,9 +1471,7 @@ impl Notas {
         )
         .padding(6.0)
         .width(300.0)
-        .style(move |_| {
-            Style::default().background(c.papel).border(Border::rounded(12.0).color(c.borda, 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.18), offset: Point::new(0.0, 6.0), blur: 20.0 })
-        });
+        .style(flutuante(c, 12.0, 0.18, 6.0, 20.0));
         stack![mouse_area(Space::new(Length::FILL, Length::FILL)).on_press(Msg::FecharMenu), container(cartao).width(Length::FILL).align_x(Align::End).padding(Padding { top: ALTURA_BARRA, right: 140.0, ..Padding::ZERO })].into()
     }
 
@@ -1509,7 +1511,7 @@ impl Notas {
         let cartao = container(column![modo, container(dica).padding([0u16, 10]), separador(), if self.outras_cod { container(scrollable(lista)).height(Length::Fixed(altura)) } else { container(lista) }, rodape].spacing(2))
             .padding(6.0)
             .width(300.0)
-            .style(move |_| Style::default().background(c.papel).border(Border::rounded(12.0).color(c.borda, 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.18), offset: Point::new(0.0, 6.0), blur: 20.0 }));
+            .style(flutuante(c, 12.0, 0.18, 6.0, 20.0));
         stack![mouse_area(Space::new(Length::FILL, Length::FILL)).on_press(Msg::MenuCod(None)), container(cartao).width(Length::FILL).align_x(Align::End).padding(Padding { top: ALTURA_BARRA + 8.0, right: 16.0, ..Padding::ZERO })].into()
     }
 
@@ -1518,19 +1520,10 @@ impl Notas {
         let aba = &self.abas[self.ativa];
         let conteudo = self.conteudo();
         // Contar o texto inteiro só quando ele muda, não a cada quadro.
-        let chave = (aba.id, conteudo.version());
-        let [linhas, palavras, sem_espaco, todos] = {
-            let mut cache = self.estatisticas.borrow_mut();
-            match *cache {
-                Some((k, n)) if k == chave => n,
-                _ => {
-                    let t = conteudo.text();
-                    let n = [conteudo.line_count(), t.split_whitespace().count(), t.chars().filter(|c| !c.is_whitespace()).count(), t.chars().filter(|&c| c != '\n' && c != '\r').count()];
-                    *cache = Some((chave, n));
-                    n
-                }
-            }
-        };
+        let [linhas, palavras, sem_espaco, todos] = lembrar(&self.estatisticas, self.chave(), || {
+            let t = conteudo.text();
+            [conteudo.line_count(), t.split_whitespace().count(), t.chars().filter(|c| !c.is_whitespace()).count(), t.chars().filter(|&c| c != '\n' && c != '\r').count()]
+        });
         let campo = |titulo: &'static str, valor: String| column![text(titulo).size(11).color(c.mudo), text(valor).size(13).color(c.texto)].spacing(3).padding([10u16, 14]).width(Length::FILL);
         let linha = || container(Space::new(Length::FILL, 1.0)).style(caixa(c.borda, Border::default()));
         let cartao = |filhos: Vec<Element<'static, Msg>>| container(column(filhos)).width(Length::FILL).style(caixa(c.papel, Border::rounded(10.0).color(c.borda, 1.0)));
@@ -1609,7 +1602,7 @@ impl Notas {
         )
         .padding(20.0)
         .width(440.0)
-        .style(move |_| Style::default().background(c.papel).border(Border::rounded(12.0).color(c.borda, 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.25), offset: Point::new(0.0, 10.0), blur: 30.0 }));
+        .style(flutuante(c, 12.0, 0.25, 10.0, 30.0));
         let veu = container(Space::new(Length::FILL, Length::FILL)).style(caixa(Color::BLACK.alpha(0.25), Border::rounded(RAIO_JANELA)));
         stack![mouse_area(veu).on_press(Msg::Confirmar(Resposta::Cancelar)), container(cartao).width(Length::FILL).height(Length::FILL).center()].into()
     }
@@ -1643,7 +1636,7 @@ impl Notas {
         )
         .padding(22.0)
         .width(440.0)
-        .style(move |_| Style::default().background(c.papel).border(Border::rounded(12.0).color(c.borda, 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.25), offset: Point::new(0.0, 10.0), blur: 30.0 }));
+        .style(flutuante(c, 12.0, 0.25, 10.0, 30.0));
         let veu = container(Space::new(Length::FILL, Length::FILL)).style(caixa(Color::BLACK.alpha(0.25), Border::rounded(RAIO_JANELA)));
         // O véu não fecha: só o "Pronto".
         stack![mouse_area(veu), container(cartao).width(Length::FILL).height(Length::FILL).center()].into()
@@ -1718,6 +1711,7 @@ impl App for Notas {
                 let aba = &mut self.abas[self.ativa];
                 aba.json = j;
                 aba.markdown &= !j;
+                self.guardar_sessao();
             }
             Msg::IrALinha(n) => {
                 self.conteudo().go_to_line(n);
@@ -1749,7 +1743,7 @@ impl App for Notas {
             }
             // Uma palavra diferente por clique, a partir da que está selecionada.
             Msg::ProximaSuspeita => {
-                let lista = self.palavras_suspeitas();
+                let lista = Self::palavras_suspeitas(&self.suspeitas());
                 let atual = self.conteudo().selection();
                 let depois = atual.and_then(|a| lista.iter().position(|p| *p == a)).map_or(0, |i| i + 1);
                 if let Some(p) = lista.get(depois % lista.len().max(1)) {
@@ -1838,7 +1832,10 @@ impl App for Notas {
                 self.ativar(i);
                 self.guardar_sessao();
             }
-            Msg::ProximaAba => self.ativar((self.ativa + 1) % self.abas.len()),
+            Msg::ProximaAba => {
+                self.ativar((self.ativa + 1) % self.abas.len());
+                self.guardar_sessao();
+            }
             Msg::Nova => {
                 self.menu = false;
                 self.nova_aba(None);
@@ -1977,6 +1974,11 @@ impl App for Notas {
             Msg::Pedido(p) => match p.as_str() {
                 "postit" => return self.update(Msg::NovoPostIt),
                 "trocar" => return self.update(Msg::Sair),
+                _ if p.starts_with("abrirx\0") => {
+                    let _ = self.update(Msg::Abertos(p.split('\0').skip(1).filter_map(instancia::caminho_de_hex).collect()));
+                    return self.update(Msg::MostrarPrincipal);
+                }
+                // Das versões até a 0.1.14: o caminho em texto.
                 _ if p.starts_with("abrir\0") => {
                     let _ = self.update(Msg::Abertos(p.split('\0').skip(1).map(PathBuf::from).collect()));
                     return self.update(Msg::MostrarPrincipal);
@@ -2325,6 +2327,36 @@ mod testes {
         assert!(!n.postits.iter().any(|p| p.id == vazio));
     }
 
+    /// Salvar recusa o que não cabe sem tocar no arquivo, aplica a quebra escolhida e mantém as
+    /// permissões; arquivo que não abre não fica "alterado" (não iria por cima do original).
+    #[test]
+    fn salvar_e_carregar_arquivos() {
+        let pasta = std::env::temp_dir().join(format!("feathernotes-salvar-{}", std::process::id()));
+        std::fs::create_dir_all(&pasta).unwrap();
+        let arq = pasta.join("a.sh");
+        std::fs::write(&arq, "a\nb").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&arq, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut n = Notas::novo();
+        let _ = n.update(Msg::Abertos(vec![arq.clone()]));
+        let id = n.abas[n.ativa].id;
+        assert_eq!(n.conteudo().text(), "a\nb");
+        n.abas[n.ativa].conteudo = Some(Content::with_text("a\n€"));
+        n.abas[n.ativa].cod = Cod::Latin1;
+        assert!(!n.salvar(id, arq.clone()), "€ não cabe em Latin-1");
+        assert_eq!(std::fs::read(&arq).unwrap(), b"a\nb");
+        n.abas[n.ativa].cod = Cod::Utf8;
+        let _ = n.update(Msg::QuebraLinha(Quebra::Crlf));
+        assert!(n.salvar(id, arq.clone()));
+        assert_eq!(std::fs::read(&arq).unwrap(), "a\r\n€".as_bytes());
+        assert!(!n.abas[n.ativa].alterada());
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&arq).unwrap().permissions()) & 0o777, 0o755);
+        let _ = n.update(Msg::Abertos(vec![pasta.join("nao-existe.txt")]));
+        assert!(!n.abas[n.ativa].alterada() && n.conteudo().text().is_empty());
+        let _ = std::fs::remove_dir_all(&pasta);
+    }
+
     /// Link que não é da web nem e-mail não abre: só avisa.
     #[test]
     fn link_de_arquivo_nao_abre() {
@@ -2341,7 +2373,7 @@ mod testes {
         n.abas[n.ativa].conteudo = Some(Content::with_text("Sua conta foi bloqueada.\nEntre em https://pаypal.com/login para liberar.\nOu ligue para o suporte da gοogle.com.\nNovo endereço: аррӏе.com\nПривет, olá, café, Δt = 2πr: normal.\n"));
         let tela = |n: &Notas| capture(&n.view(), Size::new(980.0, 420.0), 1.0, &n.theme(), &mut Renderer::new(), None);
         tela(&n);
-        assert_eq!(n.palavras_suspeitas(), vec!["pаypal", "gοogle", "аррӏе"]);
+        assert_eq!(Notas::palavras_suspeitas(&n.suspeitas()), vec!["pаypal", "gοogle", "аррӏе"]);
         let _ = n.update(Msg::ProximaSuspeita);
         assert_eq!(n.conteudo().selection().as_deref(), Some("pаypal"));
         let _ = n.update(Msg::ProximaSuspeita);

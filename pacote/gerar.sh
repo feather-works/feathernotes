@@ -109,7 +109,8 @@ for t in 16 24 32 48 64 128 256 512; do
 done
 mkdir -p ~/.local/share/icons/hicolor/scalable/apps
 cp icones/feathernotes.svg ~/.local/share/icons/hicolor/scalable/apps/feathernotes.svg
-# Só entra no "Abrir com" (MimeType= do .desktop); o programa padrão de texto continua o da pessoa.
+# Aqui só entra no "Abrir com" (MimeType= do .desktop); o próprio app vira o padrão de .txt e .md
+# na primeira vez que abre (arquivo::tornar_padrao).
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 echo "FeatherNotes instalado. Procure por \"FeatherNotes\" no menu de aplicativos."
 SH

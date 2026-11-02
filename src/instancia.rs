@@ -84,6 +84,11 @@ fn so_do_dono(arquivo: &std::path::Path) -> bool {
 pub fn pedidos(l: TcpListener, senha: String) -> impl futures::Stream<Item = String> + Send {
     let prefixo = format!("{PREFIXO}{senha} ");
     let (mut envia, recebe) = futures::channel::mpsc::channel(4);
+    // O executável como estava ao abrir: se o arquivo nesse caminho mudar, uma atualização o trocou.
+    let exe = std::env::current_exe().ok();
+    let data = |e: &std::path::Path| std::fs::metadata(e).and_then(|m| m.modified()).ok();
+    let original = exe.as_deref().and_then(data);
+    let substituido = move || exe.as_deref().is_some_and(|e| data(e) != original);
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
             let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
@@ -102,10 +107,23 @@ pub fn pedidos(l: TcpListener, senha: String) -> impl futures::Stream<Item = Str
     recebe
 }
 
-/// A atualização trocou o executável no disco (o Linux marca o antigo como apagado): este
-/// processo é a versão velha e deve dar lugar à nova.
-fn substituido() -> bool {
-    std::fs::read_link("/proc/self/exe").is_ok_and(|e| e.to_string_lossy().ends_with(" (deleted)"))
+/// O caminho na linha do pedido, byte a byte em hexadecimal: nome que não é UTF-8 (ou com quebra
+/// de linha) atravessa a porta sem perder nada.
+pub fn caminho_em_hex(p: &std::path::Path) -> String {
+    #[cfg(unix)]
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()).to_vec();
+    #[cfg(not(unix))]
+    let bytes = p.to_string_lossy().into_owned().into_bytes();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// O contrário de `caminho_em_hex`; `None` se veio estragado.
+pub fn caminho_de_hex(h: &str) -> Option<std::path::PathBuf> {
+    let bytes = (0..h.len()).step_by(2).map(|i| u8::from_str_radix(h.get(i..i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?;
+    #[cfg(unix)]
+    return Some(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(bytes).into());
+    #[cfg(not(unix))]
+    String::from_utf8(bytes).ok().map(Into::into)
 }
 
 #[cfg(test)]
@@ -127,7 +145,19 @@ mod testes {
         assert_eq!(futures::executor::block_on(futures::StreamExt::next(&mut fluxo)), Some("postit".to_string()));
     }
 
-    /// A porta anotada é de outro programa (aceita e não responde): não conta como entregue.
+    /// Caminho com quebra de linha e bytes que não são UTF-8 vai e volta igual.
+    #[test]
+    fn caminho_atravessa_em_hex() {
+        #[cfg(unix)]
+        let p = std::path::PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(b"/tmp/a\nb\xe7\xe3o.txt".to_vec()));
+        #[cfg(not(unix))]
+        let p = std::path::PathBuf::from("C:\\a b\\ação.txt");
+        assert_eq!(caminho_de_hex(&caminho_em_hex(&p)), Some(p));
+        assert_eq!(caminho_de_hex("zz"), None);
+        assert_eq!(caminho_de_hex("abc"), None);
+    }
+
+        /// A porta anotada é de outro programa (aceita e não responde): não conta como entregue.
     #[test]
     fn porta_velha_nao_engana() {
         let outro = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

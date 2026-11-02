@@ -2,7 +2,7 @@
 //! Números e textos saem como foram escritos: sem perder precisão nem trocar os escapes.
 
 /// Onde o JSON quebrou, contando de 1.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Erro {
     pub linha: usize,
     pub coluna: usize,

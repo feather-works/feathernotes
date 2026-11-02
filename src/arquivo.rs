@@ -3,11 +3,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Grava num temporário ao lado e troca: queda de energia no meio não corta o arquivo.
-// shortcut: o rename troca um link simbólico pelo arquivo e não copia as permissões; gravar por cima quando alguém precisar.
+// shortcut: o rename troca um link simbólico pelo arquivo; gravar por cima quando alguém precisar.
 pub fn gravar(p: &Path, bytes: &[u8]) -> io::Result<()> {
     let nome = p.file_name().ok_or_else(|| io::Error::other("caminho sem nome de arquivo"))?;
     let tmp = p.with_file_name(format!(".{}.feathernotes", nome.to_string_lossy()));
     let mut f = std::fs::File::create(&tmp)?;
+    // As permissões do arquivo que vai ser trocado: um script continua executável.
+    if let Ok(m) = std::fs::metadata(p) {
+        f.set_permissions(m.permissions())?;
+    }
     io::Write::write_all(&mut f, bytes)?;
     // Para o disco antes de trocar: sem isso, no XFS a queda pode deixar o arquivo vazio.
     f.sync_all()?;
@@ -36,6 +40,7 @@ pub struct AbaSalva {
     pub id: u64,
     pub caminho: Option<PathBuf>,
     pub markdown: bool,
+    pub json: bool,
     /// A de salvar; `None` nas sessões antigas (aí detecta pelo arquivo).
     pub cod: Option<crate::codificacao::Cod>,
     /// A escolhida nas propriedades e ainda não salva; `None` = a que o texto tem.
@@ -49,6 +54,9 @@ pub fn gravar_sessao(ativa: usize, abas: &[AbaSalva]) -> io::Result<()> {
         s.push_str(&format!("aba\t{}\t{}\n", a.id, a.caminho.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned())));
         if a.markdown {
             s.push_str(&format!("md\t{}\n", a.id));
+        }
+        if a.json {
+            s.push_str(&format!("json\t{}\n", a.id));
         }
         if let Some(c) = a.cod {
             s.push_str(&format!("cod\t{}\t{}\n", a.id, c.nome()));
@@ -72,13 +80,18 @@ pub fn ler_sessao() -> (usize, Vec<AbaSalva>) {
             ["ativa", n] => ativa = n.parse().unwrap_or(0),
             ["aba", id, caminho] => {
                 if let Ok(id) = id.parse() {
-                    abas.push(AbaSalva { id, caminho: (!caminho.is_empty()).then(|| PathBuf::from(caminho)), markdown: false, cod: None, quebra: None });
+                    abas.push(AbaSalva { id, caminho: (!caminho.is_empty()).then(|| PathBuf::from(caminho)), markdown: false, json: false, cod: None, quebra: None });
                 }
             }
             // Numa linha à parte: sessões antigas, sem ela, continuam lendo.
             ["md", id] => {
                 if let Some(a) = abas.iter_mut().find(|a| id.parse() == Ok(a.id)) {
                     a.markdown = true;
+                }
+            }
+            ["json", id] => {
+                if let Some(a) = abas.iter_mut().find(|a| id.parse() == Ok(a.id)) {
+                    a.json = true;
                 }
             }
             ["cod", id, nome] => {
@@ -209,7 +222,7 @@ pub fn gravar_preferencias(p: &Preferencias) {
     };
     let caminho = arquivo_preferencias();
     let _ = std::fs::create_dir_all(caminho.parent().expect("tem pasta"));
-    let _ = std::fs::write(caminho, format!("tema={tema}\nfonte={fonte}\ntamanho={}\nquebra={}\ninvisiveis={}\nconfigurado={}\n", p.tamanho, u8::from(p.quebra), u8::from(p.invisiveis), u8::from(p.configurado)));
+    let _ = gravar(&caminho, format!("tema={tema}\nfonte={fonte}\ntamanho={}\nquebra={}\ninvisiveis={}\nconfigurado={}\n", p.tamanho, u8::from(p.quebra), u8::from(p.invisiveis), u8::from(p.configurado)).as_bytes());
 }
 
 /// O GNOME guarda o modo escuro em `color-scheme`.
@@ -353,8 +366,8 @@ mod testes {
     fn sessao_volta_e_guarda_a_copia() {
         use crate::codificacao::Cod;
         let abas = [
-            AbaSalva { id: 9001, caminho: Some("/tmp/a b.md".into()), markdown: true, cod: Some(Cod::Legado("windows-1252")), quebra: Some(crate::Quebra::Crlf) },
-            AbaSalva { id: 9002, caminho: None, markdown: false, cod: None, quebra: None },
+            AbaSalva { id: 9001, caminho: Some("/tmp/a b.md".into()), markdown: true, json: false, cod: Some(Cod::Legado("windows-1252")), quebra: Some(crate::Quebra::Crlf) },
+            AbaSalva { id: 9002, caminho: None, markdown: false, json: true, cod: None, quebra: None },
         ];
         gravar_sessao(1, &abas).unwrap();
         gravar(&recuperacao(9001), b"nao salvo").unwrap();
@@ -365,7 +378,7 @@ mod testes {
         let a = lidas.iter().find(|a| a.id == 9001).unwrap();
         assert_eq!((a.caminho.as_deref(), a.markdown, a.cod, a.quebra), (Some(Path::new("/tmp/a b.md")), true, Some(Cod::Legado("windows-1252")), Some(crate::Quebra::Crlf)));
         let b = lidas.iter().find(|a| a.id == 9002).unwrap();
-        assert_eq!((b.caminho.as_deref(), b.markdown, b.cod, b.quebra), (None, false, None, None));
+        assert_eq!((b.caminho.as_deref(), b.markdown, b.json, b.cod, b.quebra), (None, false, true, None, None));
         assert!(recuperacao(9001).exists(), "a cópia de uma aba da sessão fica");
         assert!(!orfa.exists(), "a de ninguém vai embora");
     }

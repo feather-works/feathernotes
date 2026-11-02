@@ -17,12 +17,13 @@ Estado: ✅ corrigido · ⏳ pendente
      arquivo, e "Salvar" grava o vazio por cima do arquivo de verdade.
    - Conserto: no erro, marcar a aba como não alterada (`Some(0)`), sem cópia de recuperação.
 
-2. ⏳ **O .deb não instala na maioria das distros** (`pacote/gerar.sh`)
+2. ✅ **O .deb não instala na maioria das distros** (`pacote/gerar.sh`)
    - Pede `libc6 (>= 2.43)`, a glibc da máquina que compila. Ubuntu 24.04 tem 2.39, Debian 12 tem
      2.36, Mint 22 tem 2.39. O binário precisa mesmo da 2.43 (`acosf`, `atan2f`), então só trocar
      o número não basta.
    - Conserto: compilar num sistema mais antigo (contêiner `ubuntu:22.04`, glibc 2.35) ou com
      `cargo zigbuild --target x86_64-unknown-linux-gnu.2.31`, e pôr essa versão no `Depends`.
+   - Feito: `pacote/gerar.sh` compila num contêiner Debian 12 (glibc 2.36) e o `Depends` sai do binário.
 
 ## Deveria corrigir
 
@@ -98,3 +99,26 @@ Estado: ✅ corrigido · ⏳ pendente
 - As partes de `main.rs` que montam a tela e a formatação de Markdown (`formatar`, `prefixo`), só
   passei o olho.
 - O travamento não foi reproduzido.
+
+# Auditoria do FeatherNotes 0.1.14 (2026-11-02)
+
+Todos corrigidos; 27 testes passam (`cargo test`).
+
+1. ✅ **Atualizar no Windows com o app aberto deixava a versão velha rodando** (`src/instancia.rs`):
+   só o Linux percebia o executável trocado. Agora compara a data do arquivo no caminho de quando abriu.
+2. ✅ **Tailandês e russo do DOS abriam embaralhados** (`src/codificacao.rs`): o palpite do chardetng
+   virava Windows-1252. Fica o palpite; IBM866 e Windows-874 entraram em "Outras codificações".
+3. ✅ **Salvar tirava a permissão de execução de um script** (`src/arquivo.rs`, `gravar`).
+4. ✅ **Sem teste de salvar e carregar arquivos**: `salvar_e_carregar_arquivos`.
+5. ✅ **O `instalar.sh` prometia não mudar o app padrão**, mas o app vira o padrão na primeira vez
+   (de propósito, commit `89cf73b`): o comentário foi corrigido.
+6. ✅ **Quatro caches escritos à mão e limpos em dois lugares** (`src/main.rs`): `lembrar` e `esquecer_contagens`.
+7. ✅ **Disco consultado a cada quadro** para as abas fechadas, e a lista de suspeitas copiada duas vezes.
+8. ✅ **O modo JSON não voltava com a sessão**: linha `json`, como a `md`.
+9. ✅ **Preferências gravadas sem o temporário**: agora pelo `gravar`.
+10. ✅ **O mesmo estilo de cartão em seis lugares**: `flutuante`.
+11. ✅ **Caminho que não é UTF-8 se perdia no pedido ao app aberto**: vai em hexadecimal (`abrirx`);
+    o `abrir` em texto das versões antigas continua aceito.
+12. ✅ **Ctrl+Tab não guardava a aba ativa na sessão.**
+
+Não verificado: a atualização com o app aberto num Windows de verdade (o build do Windows só foi checado com `cargo check`).

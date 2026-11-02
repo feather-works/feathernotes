@@ -38,6 +38,8 @@ pub const OUTRAS: &[Cod] = &[
     Cod::Legado("iso-8859-2"),
     Cod::Legado("koi8-r"),
     Cod::Legado("koi8-u"),
+    Cod::Legado("IBM866"),
+    Cod::Legado("windows-874"),
     Cod::Legado("shift_jis"),
     Cod::Legado("euc-jp"),
     Cod::Legado("iso-2022-jp"),
@@ -74,6 +76,7 @@ impl Cod {
                 "windows-1255" => "Windows-1255",
                 "windows-1256" => "Windows-1256",
                 "windows-1257" => "Windows-1257",
+                "windows-874" => "Windows-874",
                 _ => "Windows-1258",
             },
             Cod::Legado(n) => encoding_rs::Encoding::for_label(n.as_bytes()).map_or(n, |e| e.name()),
@@ -194,11 +197,11 @@ pub fn detectar(bytes: &[u8]) -> Cod {
     let mut d = chardetng::EncodingDetector::new();
     d.feed(bytes, true);
     let e = d.guess(None, true);
-    // O chardetng responde Windows-1252 para o que também é Latin-1; os outros nomes do encoding_rs são minúsculos.
+    // O rótulo das listas, para o menu marcar a escolhida; fora delas (nenhuma hoje), o nome do encoding_rs.
     let rotulo: &'static str = [PRINCIPAIS, OUTRAS].concat().into_iter().find_map(|c| match c {
         Cod::Legado(n) if encoding_rs::Encoding::for_label(n.as_bytes()) == Some(e) => Some(n),
         _ => None,
-    }).unwrap_or("windows-1252");
+    }).unwrap_or(e.name());
     Cod::Legado(rotulo)
 }
 
@@ -223,6 +226,10 @@ mod testes {
     fn tabelas_do_dos_tem_128() {
         assert_eq!(CP437.chars().count(), 128);
         assert_eq!(CP850.chars().count(), 128);
+        // Cada nome volta à sua codificação (a sessão guarda o nome).
+        for &c in PRINCIPAIS.iter().chain(OUTRAS) {
+            assert_eq!(pelo_nome(c.nome()), Some(c), "{c:?}");
+        }
     }
 
     #[test]
@@ -247,6 +254,11 @@ mod testes {
     fn detecta_e_conserta() {
         let (bytes, _, _) = encoding_rs::WINDOWS_1251.encode("Привет, как дела? Это обычный русский текст для проверки.");
         assert_eq!(detectar(&bytes).nome(), "Windows-1251");
+        // Tailandês e russo do DOS: o palpite do chardetng fica, não vira Windows-1252.
+        let (bytes, _, _) = encoding_rs::WINDOWS_874.encode("สวัสดีครับ นี่คือข้อความภาษาไทยสำหรับทดสอบการตรวจจับการเข้ารหัส");
+        assert_eq!(detectar(&bytes), Cod::Legado("windows-874"));
+        let (bytes, _, _) = encoding_rs::IBM866.encode("Привет, это обычный русский текст для проверки кодировки DOS.");
+        assert_eq!(detectar(&bytes), Cod::Legado("IBM866"));
         assert_eq!(consertar_acentos("JoÃ£o e AÃ§Ã£o"), Some("João e Ação".into()));
         assert_eq!(consertar_acentos("João"), None);
     }
