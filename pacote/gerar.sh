@@ -3,7 +3,7 @@
 # launcher procura na release (releases/latest/download/<nome>):
 #   feathernotes-linux-x86_64.tar.gz   Linux portátil (instalar.sh na pasta do usuário)
 #   feathernotes-linux-amd64.deb       Debian, Ubuntu, Mint…
-#   FeatherNotes-windows-x64.exe       Windows 10/11 (instalador por usuário, sem administrador)
+#   FeatherNotes-windows-x64.exe       Windows 10/11 (instalador em Program Files\FeatherWorks, pede administrador)
 #   SHA256SUMS
 #
 # Uso: pacote/gerar.sh [linux|windows ...]   (sem argumentos = todos)
