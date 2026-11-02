@@ -22,6 +22,16 @@ const LARGURA_COMPACTA: f32 = 560.0;
 const TAMANHO_JANELA: Size = Size::new(980.0, 680.0);
 const SEM_TITULO: &str = "Sem título.txt";
 const TAMANHO_PADRAO: f32 = 15.0;
+/// Filtros dos diálogos Abrir e Salvar como (grava tudo como texto, sem perda). Os mesmos
+/// tipos vão no "Abrir com" do pacote/feathernotes.nsi e no MimeType= do .desktop.
+const FORMATOS: &[(&str, &[&str])] = &[
+    ("Texto", &["txt"]),
+    ("Markdown", &["md", "markdown"]),
+    ("JSON", &["json"]),
+    ("Log", &["log"]),
+    ("CSV", &["csv"]),
+    ("Configuração", &["ini", "conf", "cfg"]),
+];
 /// A pena do FeatherNotes: azul.
 const COR_APP: &str = "#2f7ae5";
 
@@ -723,7 +733,14 @@ impl Notas {
                 let pasta = atual.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(dirs::document_dir);
                 Task::perform(
                     async move {
-                        let mut d = rfd::AsyncFileDialog::new().set_file_name(nome).add_filter("Texto", &["txt"]);
+                        // O formato do nome atual vem primeiro: é o filtro que o diálogo seleciona.
+                        let ext = std::path::Path::new(&nome).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                        let (mesmo, outros): (Vec<_>, Vec<_>) = FORMATOS.iter().partition(|(_, e)| e.contains(&ext.as_str()));
+                        let mut d = rfd::AsyncFileDialog::new().set_file_name(nome);
+                        for (rotulo, exts) in mesmo.into_iter().chain(outros) {
+                            d = d.add_filter(rotulo, exts);
+                        }
+                        d = d.add_filter("Todos os arquivos", &["*"]);
                         if let Some(p) = pasta {
                             d = d.set_directory(p);
                         }
@@ -1820,7 +1837,12 @@ impl App for Notas {
                 let pasta = self.abas[self.ativa].caminho.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()).or_else(dirs::document_dir);
                 return Task::perform(
                     async move {
-                        let mut d = rfd::AsyncFileDialog::new().add_filter("Texto", &["txt", "md", "json", "log", "csv", "ini", "conf"]).add_filter("Todos os arquivos", &["*"]);
+                        let todos: Vec<&str> = FORMATOS.iter().flat_map(|(_, e)| e.iter().copied()).collect();
+                        let mut d = rfd::AsyncFileDialog::new().add_filter("Todos os textos", &todos);
+                        for (rotulo, exts) in FORMATOS {
+                            d = d.add_filter(*rotulo, exts);
+                        }
+                        d = d.add_filter("Todos os arquivos", &["*"]);
                         if let Some(p) = pasta {
                             d = d.set_directory(p);
                         }

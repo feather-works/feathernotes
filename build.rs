@@ -1,6 +1,7 @@
 fn main() {
     // Só o .exe do Windows: ícone e o nome "FeatherNotes" (sem o VERSIONINFO o Windows mostra
-    // "feathernotes.exe" no menu Iniciar, na barra de tarefas e no Gerenciador de Tarefas).
+    // "feathernotes.exe" no menu Iniciar, na barra de tarefas e no Gerenciador de Tarefas) e o
+    // manifesto (Windows 10/11 e escala por monitor; o deslocamento do FeatherSheet #135).
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -9,6 +10,7 @@ fn main() {
     let numeros: Vec<&str> = versao.split(['.', '-']).take(3).collect();
     let rc = format!(
         r#"1 ICON "{raiz}/pacote/icones/feathernotes.ico"
+1 24 "{raiz}/pacote/feathernotes.manifest"
 1 VERSIONINFO
 FILEVERSION {v},0
 PRODUCTVERSION {v},0
@@ -38,5 +40,6 @@ END
     std::fs::write(&arquivo, rc).unwrap();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=pacote/icones/feathernotes.ico");
+    println!("cargo:rerun-if-changed=pacote/feathernotes.manifest");
     embed_resource::compile(&arquivo, embed_resource::NONE).manifest_optional().expect("ícone e nome do .exe");
 }
