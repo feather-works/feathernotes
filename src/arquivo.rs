@@ -227,19 +227,7 @@ pub fn sistema_escuro() -> bool {
 pub fn iniciar_com_sistema(ligar: bool) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CHAVE: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-        let mut c = std::process::Command::new("reg");
-        if ligar {
-            c.args(["add", CHAVE, "/v", "FeatherNotes", "/t", "REG_SZ", "/d", &format!("\"{}\" --fundo", exe.display()), "/f"]);
-        } else {
-            c.args(["delete", CHAVE, "/v", "FeatherNotes", "/f"]);
-        }
-        // Sem a janelinha do console piscando.
-        let ok = c.creation_flags(0x0800_0000).status()?.success();
-        return if ok || !ligar { Ok(()) } else { Err(io::Error::other("o reg add falhou")) };
-    }
+    return if ligar { run_windows::gravar(&format!("\"{}\" --fundo", exe.display())) } else { run_windows::apagar() };
     #[cfg(not(windows))]
     {
         let arquivo = arquivo_autostart();
@@ -255,16 +243,43 @@ pub fn iniciar_com_sistema(ligar: bool) -> io::Result<()> {
 
 pub fn inicia_com_sistema() -> bool {
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        return std::process::Command::new("reg")
-            .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "FeatherNotes"])
-            .creation_flags(0x0800_0000)
-            .output()
-            .is_ok_and(|o| o.status.success());
-    }
+    return run_windows::existe();
     #[cfg(not(windows))]
     arquivo_autostart().exists()
+}
+
+/// O valor "FeatherNotes" da chave `Run` (HKCU) pela API do Windows. O `reg.exe` escondido de
+/// antes (programa do sistema rodado sem janela) é o tipo de coisa que o Defender acusa.
+#[cfg(windows)]
+mod run_windows {
+    use std::io;
+    use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ};
+
+    fn largo(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain([0]).collect()
+    }
+    const CHAVE: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const NOME: &str = "FeatherNotes";
+
+    pub fn gravar(valor: &str) -> io::Result<()> {
+        let (chave, nome, valor) = (largo(CHAVE), largo(NOME), largo(valor));
+        // SAFETY: textos terminados em zero, tamanho em bytes com o zero final.
+        let r = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, chave.as_ptr(), nome.as_ptr(), REG_SZ, valor.as_ptr().cast(), (valor.len() * 2) as u32) };
+        if r == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(r as i32)) }
+    }
+
+    pub fn apagar() -> io::Result<()> {
+        let (chave, nome) = (largo(CHAVE), largo(NOME));
+        // Sem o valor, apagar falha; para quem desligou, tanto faz.
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, chave.as_ptr(), nome.as_ptr()) };
+        Ok(())
+    }
+
+    pub fn existe() -> bool {
+        let (chave, nome) = (largo(CHAVE), largo(NOME));
+        // SAFETY: só pergunta se existe (sem buffer).
+        unsafe { RegGetValueW(HKEY_CURRENT_USER, chave.as_ptr(), nome.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) == 0 }
+    }
 }
 
 #[cfg(not(windows))]
