@@ -3,6 +3,8 @@
 //! e uma sessão que volta como estava (com o que não foi salvo) quando o app abre de novo.
 mod alfabeto;
 mod arquivo;
+#[cfg(windows)]
+mod cantos;
 mod codificacao;
 mod consumo;
 mod instancia;
@@ -15,9 +17,9 @@ use pelicano::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
-// No Windows a janela não é transparente (pelicano): fora do canto arredondado saía preto.
-// Lá fica reta, e o DWM do Windows 11 arredonda sozinho (como a moldura do feather-ui).
-const RAIO_JANELA: f32 = if cfg!(windows) { 0.0 } else { 10.0 };
+// No Windows a janela não é transparente (pelicano): o fundo do tema é opaco e o canto vem
+// de recortar a janela (cantos.rs, Windows 10) ou do DWM (Windows 11).
+const RAIO_JANELA: f32 = 10.0;
 const ALTURA_BARRA: f32 = 44.0;
 /// Abaixo desta largura a janela fica compacta: sem o nome do app e sem os números das linhas.
 const LARGURA_COMPACTA: f32 = 560.0;
@@ -36,6 +38,17 @@ const FORMATOS: &[(&str, &[&str])] = &[
 ];
 /// A pena do FeatherNotes: azul.
 const COR_APP: &str = "#2f7ae5";
+
+/// Windows 10: o canto arredondado da janela `id` assim que ela abre (cantos.rs); o resto, nada.
+fn recortar(id: WindowId) -> Option<Task<Msg>> {
+    #[cfg(windows)]
+    return Some(Task::done(Msg::Recortar(id)));
+    #[cfg(not(windows))]
+    {
+        let _ = id;
+        None
+    }
+}
 
 /// A janela principal. `escondida`: o app começa em segundo plano (início com o sistema, atalho do post-it).
 fn janela_principal(escondida: bool) -> Settings {
@@ -97,7 +110,7 @@ fn main() -> Result<(), Error> {
         // Os post-its que estavam abertos voltam junto.
         let abrir: Vec<usize> = (0..n.postits.len()).filter(|&i| n.postits[i].aberto).collect();
         let abertos: Vec<Task<Msg>> = abrir.into_iter().map(|i| n.abrir_postit(i)).collect();
-        (n, Task::batch([Task::run(tique(Duration::from_secs(2)), |_| Msg::Medir)].into_iter().chain(abertos).chain(pedidos).chain(novo).chain(abrir_arquivos)))
+        (n, Task::batch([Task::run(tique(Duration::from_secs(2)), |_| Msg::Medir)].into_iter().chain(abertos).chain(pedidos).chain(novo).chain(abrir_arquivos).chain(recortar(WindowId::MAIN))))
     })
 }
 
@@ -223,6 +236,12 @@ struct Notas {
 #[derive(Debug, Clone)]
 enum Msg {
     Mudou,
+    /// Nada a fazer (resposta de uma tarefa que só age na janela).
+    #[cfg(windows)]
+    Nenhum,
+    /// Windows 10: recortar o canto arredondado da janela depois de mudar de tamanho.
+    #[cfg(windows)]
+    Recortar(WindowId),
     Tamanho(Size),
     MenuCod(Option<bool>),
     OutrasCod,
@@ -530,7 +549,7 @@ impl Notas {
         // Fechar pelo sistema (Alt+F4) também passa pela pergunta.
         let s = Settings { title: "Post-it".into(), size: Size::new(280.0, 280.0), min_size: Some(Size::new(180.0, 140.0)), decorations: false, transparent: true, close_on_request: false, app_id: Some("feathernotes".into()), position: p.posicao, skip_taskbar: true, ..Default::default() };
         let fixo = p.fixo.then(|| Task::window_of(WindowId(p.id), WindowCmd::Level(WindowLevel::AlwaysOnBottom)));
-        Task::batch([Task::open_window(WindowId(p.id), s)].into_iter().chain(fixo))
+        Task::batch([Task::open_window(WindowId(p.id), s)].into_iter().chain(fixo).chain(recortar(WindowId(p.id))))
     }
 
     /// A janela fecha: o post-it vazio some de vez; `excluir` manda para a lixeira da lista; o resto
@@ -1649,7 +1668,18 @@ impl App for Notas {
     fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
             Msg::Mudou => return self.mudou(),
-            Msg::Tamanho(t) => (self.largura, self.altura) = (t.width, t.height),
+            Msg::Tamanho(t) => {
+                (self.largura, self.altura) = (t.width, t.height);
+                #[cfg(windows)]
+                return self.update(Msg::Recortar(WindowId::MAIN));
+            }
+            #[cfg(windows)]
+            Msg::Nenhum => {}
+            #[cfg(windows)]
+            Msg::Recortar(id) => return Task::window_handle(id, |h| {
+                cantos::recortar(h, RAIO_JANELA);
+                Msg::Nenhum
+            }),
             Msg::MenuCod(m) => self.menu_cod = m,
             Msg::OutrasCod => self.outras_cod = !self.outras_cod,
             Msg::Reabrir(cod) => {
@@ -2045,7 +2075,7 @@ impl App for Notas {
                 }
                 self.guardar_postits();
             }
-            Msg::MostrarPrincipal => return Task::batch([Task::open_window(WindowId::MAIN, janela_principal(false)), Task::window(WindowCmd::Focus)]),
+            Msg::MostrarPrincipal => return Task::batch([Task::open_window(WindowId::MAIN, janela_principal(false)), Task::window(WindowCmd::Focus)].into_iter().chain(recortar(WindowId::MAIN))),
             Msg::Sair => {
                 self.guardar_sessao();
                 return Task::window(WindowCmd::Exit);
@@ -2079,6 +2109,8 @@ impl App for Notas {
         }
         match ev {
             Event::CloseRequested => Some(Msg::PostItFechar(id.0)),
+            #[cfg(windows)]
+            Event::Resized(_) => Some(Msg::Recortar(id)),
             // O (0, 0) chega logo que a janela nasce, antes de o gerenciador pôr ela no lugar.
             Event::Moved(p) if *p != Point::ORIGIN => Some(Msg::PostItMoveu(id.0, *p)),
             Event::Key { key: Key::Character(k), modifiers, pressed: true, .. } if modifiers.control_key() && k.eq_ignore_ascii_case("n") => Some(Msg::NovoPostIt),
