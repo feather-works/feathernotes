@@ -15,7 +15,9 @@ use pelicano::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const RAIO_JANELA: f32 = 10.0;
+// No Windows a janela não é transparente (pelicano): fora do canto arredondado saía preto.
+// Lá fica reta, e o DWM do Windows 11 arredonda sozinho (como a moldura do feather-ui).
+const RAIO_JANELA: f32 = if cfg!(windows) { 0.0 } else { 10.0 };
 const ALTURA_BARRA: f32 = 44.0;
 /// Abaixo desta largura a janela fica compacta: sem o nome do app e sem os números das linhas.
 const LARGURA_COMPACTA: f32 = 560.0;
@@ -2060,7 +2062,7 @@ impl App for Notas {
     fn theme(&self) -> Theme {
         let c = self.cores();
         let base = if self.escuro { Theme::dark() } else { Theme::light() };
-        Theme { background: Color::TRANSPARENT, surface: c.papel, text: c.texto, muted: c.numeros, primary: c.acento, border: c.borda, ..base }
+        Theme { background: if cfg!(windows) { c.papel } else { Color::TRANSPARENT }, surface: c.papel, text: c.texto, muted: c.numeros, primary: c.acento, border: c.borda, ..base }
     }
 
     fn view_window(&self, id: WindowId) -> Element<'_, Msg> {
