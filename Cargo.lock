@@ -2535,8 +2535,8 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pelicano"
-version = "0.1.23"
-source = "git+https://github.com/feather-works/pelicano?tag=v0.1.23#ab798116523d17b77d2e135044aa04f8ba934234"
+version = "0.1.24"
+source = "git+https://github.com/feather-works/pelicano?tag=v0.1.24#c97aef15aea1f3dfc9bff7f7f0ba600da25998e7"
 dependencies = [
  "accesskit",
  "accesskit_winit",
