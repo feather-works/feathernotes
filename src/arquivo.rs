@@ -191,6 +191,8 @@ pub struct Preferencias {
     pub invisiveis: bool,
     /// Já respondeu a configuração inicial (a pergunta da primeira vez).
     pub configurado: bool,
+    /// Windows: o Win+Alt+N do post-it ligado (no GNOME quem guarda é o próprio gsettings).
+    pub atalho: bool,
 }
 
 fn arquivo_preferencias() -> PathBuf {
@@ -198,7 +200,7 @@ fn arquivo_preferencias() -> PathBuf {
 }
 
 pub fn ler_preferencias() -> Preferencias {
-    let mut p = Preferencias { tema: Tema::Automatico, fonte: Fonte::Mono, tamanho: 15.0, quebra: true, invisiveis: false, configurado: false };
+    let mut p = Preferencias { tema: Tema::Automatico, fonte: Fonte::Mono, tamanho: 15.0, quebra: true, invisiveis: false, configurado: false, atalho: false };
     for l in std::fs::read_to_string(arquivo_preferencias()).unwrap_or_default().lines() {
         match l.split_once('=') {
             Some(("tema", "claro")) => p.tema = Tema::Claro,
@@ -207,6 +209,7 @@ pub fn ler_preferencias() -> Preferencias {
             Some(("quebra", v)) => p.quebra = v != "0",
             Some(("invisiveis", v)) => p.invisiveis = v == "1",
             Some(("configurado", v)) => p.configurado = v == "1",
+            Some(("atalho", v)) => p.atalho = v == "1",
             Some(("fonte", "sans")) => p.fonte = Fonte::Sans,
             Some(("fonte", "serif")) => p.fonte = Fonte::Serif,
             _ => {}
@@ -228,7 +231,7 @@ pub fn gravar_preferencias(p: &Preferencias) {
     };
     let caminho = arquivo_preferencias();
     let _ = std::fs::create_dir_all(caminho.parent().expect("tem pasta"));
-    let _ = gravar(&caminho, format!("tema={tema}\nfonte={fonte}\ntamanho={}\nquebra={}\ninvisiveis={}\nconfigurado={}\n", p.tamanho, u8::from(p.quebra), u8::from(p.invisiveis), u8::from(p.configurado)).as_bytes());
+    let _ = gravar(&caminho, format!("tema={tema}\nfonte={fonte}\ntamanho={}\nquebra={}\ninvisiveis={}\nconfigurado={}\natalho={}\n", p.tamanho, u8::from(p.quebra), u8::from(p.invisiveis), u8::from(p.configurado), u8::from(p.atalho)).as_bytes());
 }
 
 /// O GNOME guarda o modo escuro em `color-scheme`.
@@ -307,7 +310,7 @@ fn arquivo_autostart() -> PathBuf {
 }
 
 /// A tecla do atalho do sistema que cria um post-it.
-pub const ATALHO_POSTIT: &str = "Super+Alt+N";
+pub const ATALHO_POSTIT: &str = if cfg!(windows) { "Win+Alt+N" } else { "Super+Alt+N" };
 const CHAVES: &str = "org.gnome.settings-daemon.plugins.media-keys";
 const CAMINHO_ATALHO: &str = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/feathernotes-postit/";
 
@@ -319,11 +322,13 @@ fn gsettings(args: &[&str]) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&o.stdout).trim().to_owned())
 }
 
+#[cfg(not(windows))]
 /// O gsettings lê o valor como GVariant: um texto que começa com aspas viraria outra coisa.
 fn texto_gvariant(t: &str) -> String {
     format!("'{}'", t.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
+#[cfg(not(windows))]
 /// A lista de atalhos personalizados do GNOME com o nosso posto ou tirado (os do usuário ficam).
 fn trocar_na_lista(lista: &str, ligar: bool) -> String {
     let mut itens: Vec<String> = lista.trim_start_matches("@as").trim().trim_matches(['[', ']']).split(',').map(|i| i.trim().trim_matches('\'').to_owned()).filter(|i| !i.is_empty() && i != CAMINHO_ATALHO).collect();
@@ -333,6 +338,7 @@ fn trocar_na_lista(lista: &str, ligar: bool) -> String {
     format!("[{}]", itens.iter().map(|i| format!("'{i}'")).collect::<Vec<_>>().join(", "))
 }
 
+#[cfg(not(windows))]
 /// Liga ou desliga o atalho do sistema (Super+Alt+N) que roda `feathernotes --postit`.
 // shortcut: só no GNOME (gsettings); KDE e Windows precisam do jeito deles (kglobalaccel, RegisterHotKey) quando alguém pedir.
 pub fn atalho_postit(ligar: bool) -> io::Result<()> {

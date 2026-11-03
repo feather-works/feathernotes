@@ -3,6 +3,10 @@
 //! e uma sessão que volta como estava (com o que não foi salvo) quando o app abre de novo.
 mod alfabeto;
 mod arquivo;
+#[cfg(target_os = "linux")]
+mod bandeja;
+#[cfg(windows)]
+mod atalho_windows;
 #[cfg(windows)]
 mod cantos;
 mod codificacao;
@@ -106,6 +110,15 @@ fn main() -> Result<(), Error> {
         #[cfg(target_os = "linux")]
         arquivo::tornar_padrao();
         let pedidos = porta.map(|(l, senha)| Task::run(instancia::pedidos(l, senha), Msg::Pedido));
+        #[cfg(target_os = "linux")]
+        let pedidos = pedidos.into_iter().chain([Task::run(bandeja::iniciar(), |a| match a {
+            bandeja::Acao::Mostrar => Msg::MostrarPrincipal,
+            bandeja::Acao::NovoPostIt => Msg::NovoPostIt,
+            bandeja::Acao::PostIts => Msg::MostrarPostIts,
+            bandeja::Acao::Sair => Msg::Sair,
+        })]);
+        #[cfg(windows)]
+        let pedidos = pedidos.into_iter().chain(n.atalho_postit.then(|| n.update(Msg::AtalhoPostIt(true))));
         let novo = postit.then(|| Task::done(Msg::NovoPostIt));
         let abrir_arquivos = (!arquivos.is_empty()).then(|| Task::done(Msg::Abertos(arquivos)));
         // Os post-its que estavam abertos voltam junto.
@@ -422,7 +435,8 @@ impl Notas {
             abas.push(Aba::nova(proximo_id, None));
         }
         let escuro = escuro(prefs.tema);
-        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: cfg!(target_os = "linux") && arquivo::tem_atalho_postit(), fechadas: Vec::new() };
+        let atalho_windows = prefs.atalho;
+        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: if cfg!(windows) { atalho_windows } else { cfg!(target_os = "linux") && arquivo::tem_atalho_postit() }, fechadas: Vec::new() };
         n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido, lembrete }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0, lembrete, menu_lembrete: false }).collect();
         n.carregar(n.ativa);
         n
@@ -1585,7 +1599,7 @@ impl Notas {
         let v = self.prefs.invisiveis;
         let invisiveis = row![rotulo("Caracteres invisíveis"), horizontal_space(), pilula(if v { "Mostrar" } else { "Esconder" }, v, Msg::Invisiveis)].align(Align::Center).padding([4u16, 12]);
         let inicio = self.linha_inicio(c);
-        let atalho = cfg!(target_os = "linux").then(|| self.linha_atalho(c));
+        let atalho = cfg!(any(target_os = "linux", windows)).then(|| self.linha_atalho(c));
         let descartar = (aba.caminho.is_some() && aba.alterada()).then_some(Msg::Descartar);
         let cartao = container(
             scrollable(column![
@@ -1781,7 +1795,7 @@ impl Notas {
             column![
                 row![pena(24.0), text("Configuração inicial").size(16).font(Font::SEMIBOLD).color(c.texto)].spacing(10).align(Align::Center),
                 text("Os post-its que estavam abertos voltam junto quando o FeatherNotes abre.").size(13).color(c.mudo),
-                column![self.linha_inicio(c)].push_maybe(cfg!(target_os = "linux").then(|| self.linha_atalho(c))).spacing(4),
+                column![self.linha_inicio(c)].push_maybe(cfg!(any(target_os = "linux", windows)).then(|| self.linha_atalho(c))).spacing(4),
                 row![text("Dá para mudar depois no menu ☰.").size(12).color(c.mudo), horizontal_space(), pronto].align(Align::Center),
             ]
             .spacing(14),
@@ -2147,6 +2161,19 @@ impl App for Notas {
                     Err(e) => self.aviso = Some(format!("Não deu para mudar o início com o sistema: {e}")),
                 }
             }
+            #[cfg(windows)]
+            Msg::AtalhoPostIt(ligar) => {
+                let escuta = if ligar { atalho_windows::ligar().map(Some) } else { Ok(atalho_windows::desligar()).map(|_| None) };
+                match escuta {
+                    Ok(fluxo) => {
+                        self.atalho_postit = ligar;
+                        self.mudar_prefs(|p| p.atalho = ligar);
+                        return fluxo.map_or_else(Task::none, |f| Task::run(f, |_| Msg::NovoPostIt));
+                    }
+                    Err(e) => self.aviso = Some(format!("Não deu para ligar o {}: {e}", arquivo::ATALHO_POSTIT)),
+                }
+            }
+            #[cfg(not(windows))]
             Msg::AtalhoPostIt(ligar) => match arquivo::atalho_postit(ligar) {
                 Ok(()) => self.atalho_postit = ligar,
                 Err(e) => self.aviso = Some(format!("Não deu para mudar o atalho: {e}")),
@@ -2557,22 +2584,6 @@ mod testes {
         let _ = n.update(Msg::Abertos(vec![pasta.join("nao-existe.txt")]));
         assert!(!n.abas[n.ativa].alterada() && n.conteudo().text().is_empty());
         let _ = std::fs::remove_dir_all(&pasta);
-    }
-
-    #[test]
-    #[ignore]
-    fn ver_telas() {
-        let d = PathBuf::from(std::env::var_os("VER").unwrap());
-        let mut n = Notas::novo();
-        n.prefs.configurado = true;
-        n.abas[n.ativa].markdown = true;
-        n.abas[n.ativa].conteudo = Some(Content::with_text("# Título\nTexto **negrito** e uma lista\n- item"));
-        for (nome, w, h, menu, prop) in [("menu-baixo", 600.0, 360.0, true, false), ("menu-alto", 980.0, 680.0, true, false), ("estreita", 440.0, 600.0, false, false), ("estreita-prop", 440.0, 600.0, false, true)] {
-            (n.largura, n.altura, n.menu, n.propriedades) = (w, h, menu, prop);
-            std::fs::write(d.join(format!("{nome}.png")), capture(&n.view(), Size::new(w, h), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
-        }
-        n.postits.push(PostIt { id: 90, conteudo: Content::with_text("Pagar boleto"), cor: 0, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0, lembrete: Some(hora::agora() + 3600), menu_lembrete: true });
-        std::fs::write(d.join("postit-lembrete.png"), capture(&n.view_window(WindowId(90)), Size::new(280.0, 280.0), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
     }
 
     /// O lembrete que chegou abre o post-it fechado, solta o alfinete e some; o da lixeira não toca.
