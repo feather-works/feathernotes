@@ -197,6 +197,8 @@ struct PostIt {
     lembrete: Option<i64>,
     /// As opções do lembrete (o relógio da barra) à mostra.
     menu_lembrete: bool,
+    /// O que se escreveu em "outro dia" ("15/11 14:30").
+    quando: String,
     /// A versão já gravada.
     gravado: u64,
 }
@@ -357,6 +359,8 @@ enum Msg {
     PostItMenuLembrete(u64),
     /// Marca (segundos UTC) ou tira o lembrete.
     PostItLembrete(u64, Option<i64>),
+    /// O texto de "outro dia" mudou.
+    PostItQuando(u64, String),
     PostItArrastar(u64),
     PostItPuxar(u64, ResizeDirection),
     /// O × do post-it: com texto, pergunta antes.
@@ -437,7 +441,7 @@ impl Notas {
         let escuro = escuro(prefs.tema);
         let atalho_windows = prefs.atalho;
         let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: if cfg!(windows) { atalho_windows } else { cfg!(target_os = "linux") && arquivo::tem_atalho_postit() }, fechadas: Vec::new() };
-        n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido, lembrete }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0, lembrete, menu_lembrete: false }).collect();
+        n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido, lembrete }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0, lembrete, menu_lembrete: false, quando: String::new() }).collect();
         n.carregar(n.ativa);
         n
     }
@@ -649,7 +653,7 @@ impl Notas {
         let id = self.postits.iter().map(|p| p.id + 1).max().unwrap_or(1);
         // A cor seguinte à do último: post-its novos não ficam todos iguais.
         let cor = self.postits.last().map_or(0, |p| (p.cor + 1) % CORES_POSTIT.len());
-        self.postits.push(PostIt { id, conteudo: Content::with_text(texto), cor, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0, lembrete: None, menu_lembrete: false });
+        self.postits.push(PostIt { id, conteudo: Content::with_text(texto), cor, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0, lembrete: None, menu_lembrete: false, quando: String::new() });
         let t = self.abrir_postit(self.postits.len() - 1);
         // Com texto, ele já vai para o disco (a versão 0 conta como gravada).
         if !texto.is_empty() {
@@ -768,23 +772,42 @@ impl Notas {
         let mut camadas = stack![corpo, canto];
         if p.menu_lembrete {
             let agora = hora::agora();
-            let opcao = |rotulo: &'static str, quando: Option<i64>| button(text(rotulo).size(12).color(tinta)).on_press(Msg::PostItLembrete(id, quando)).width(Length::FILL).padding([5u16, 8]).style(sobre);
+            let opcao = |rotulo: &'static str, quando: Option<i64>| button(container(text(rotulo).size(12).color(tinta)).width(Length::FILL).align_x(Align::Center)).on_press(Msg::PostItLembrete(id, quando)).width(Length::FILL).padding([5u16, 6]).style(sobre);
+            let escolhido = hora::interpretar(&p.quando, agora);
+            let campo = container(text_input("15/11 14:30", &p.quando).on_input(move |t| Msg::PostItQuando(id, t)).on_submit(escolhido.map_or_else(|| Msg::PostItQuando(id, p.quando.clone()), |t| Msg::PostItLembrete(id, Some(t)))).size(12).padding(0.0).style(move |_, _| Style::default().text_color(tinta)))
+                .padding([0u16, 8])
+                .width(Length::FILL)
+                .height(26.0)
+                .align_y(Align::Center)
+                .style(caixa(Color::WHITE.alpha(0.55), Border::rounded(6.0).color(tinta.alpha(0.25), 1.0)));
+            let marcar = button(text("Lembrar").size(12).color(Color::WHITE)).on_press_maybe(escolhido.map(|t| Msg::PostItLembrete(id, Some(t)))).padding([5u16, 10]).style(move |t, s| {
+                let mut st = sobre(t, s);
+                st.background = Some(tinta.alpha(if escolhido.is_some() { 1.0 } else { 0.35 }).into());
+                st
+            });
+            // Como foi entendido, antes de confirmar; vazio, a dica do que dá para escrever.
+            let leitura = match (escolhido, p.quando.trim().is_empty()) {
+                (Some(t), _) => format!("→ {}", hora::descrever(t)),
+                (None, true) => "Ex.: 15/11 14:30, amanhã 8h, 18:00".into(),
+                (None, false) => "Não entendi (ou já passou)".into(),
+            };
             let cartao = container(
                 column![
-                    text(p.lembrete.map_or("Lembrar de novo:".to_string(), |t| format!("Lembra em {}", hora::local(t).texto()))).size(13).font(Font::SEMIBOLD).color(tinta),
-                    opcao("Em 15 minutos", Some(agora + 15 * 60)),
-                    opcao("Em 1 hora", Some(agora + 3600)),
-                    opcao("Em 3 horas", Some(agora + 3 * 3600)),
-                    opcao("Amanhã às 9h", Some(hora::amanha_as(9))),
+                    text(p.lembrete.map_or("Lembrar:".to_string(), |t| format!("Lembra {}", hora::descrever(t)))).size(13).font(Font::SEMIBOLD).color(tinta),
+                    row![opcao("Em 15 min", Some(agora + 15 * 60)), opcao("Em 1 hora", Some(agora + 3600))].spacing(4),
+                    row![opcao("Em 3 horas", Some(agora + 3 * 3600)), opcao("Amanhã 9h", Some(hora::amanha_as(9)))].spacing(4),
+                    text("Outro dia e hora:").size(11).color(tinta.alpha(0.7)),
+                    row![campo, marcar].spacing(6).align(Align::Center),
+                    text(leitura).size(11).color(tinta.alpha(0.7)),
                 ]
                 .push_maybe(p.lembrete.map(|_| opcao("Tirar o lembrete", None)))
-                .spacing(2),
+                .spacing(5),
             )
             .padding(10.0)
             .width(Length::FILL)
             .style(move |_| Style::default().background(fundo).border(Border::rounded(8.0).color(tinta.alpha(0.25), 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.18), offset: Point::new(0.0, 4.0), blur: 14.0 }));
             let veu = container(Space::new(Length::FILL, Length::FILL)).style(caixa(tinta.alpha(0.12), Border::rounded(RAIO_JANELA)));
-            camadas = camadas.push(stack![mouse_area(veu).on_press(Msg::PostItMenuLembrete(id)), container(cartao).width(Length::FILL).height(Length::FILL).padding(12.0).center()]);
+            camadas = camadas.push(stack![mouse_area(veu).on_press(Msg::PostItMenuLembrete(id)), container(cartao).width(Length::FILL).height(Length::FILL).padding(10.0).center()]);
         }
         if p.confirmar {
             let resposta = |rotulo, r: Option<bool>, cor: Color, fundo: Option<Color>| {
@@ -2222,8 +2245,14 @@ impl App for Notas {
             Msg::PostItLembrete(id, quando) => {
                 if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
                     (p.lembrete, p.menu_lembrete) = (quando, false);
+                    p.quando.clear();
                 }
                 self.guardar_postits();
+            }
+            Msg::PostItQuando(id, t) => {
+                if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
+                    p.quando = t;
+                }
             }
             Msg::PostItArrastar(id) => return Task::window_of(WindowId(id), WindowCmd::Drag),
             Msg::PostItPuxar(id, d) => return Task::window_of(WindowId(id), WindowCmd::DragResize(d)),
@@ -2672,13 +2701,13 @@ mod testes {
                 (n.prefs.configurado, n.confirmar) = (antes, conf);
             }
             // O post-it desenha na janela dele.
-            n.postits.push(PostIt { id: 77, conteudo: Content::with_text("Comprar pão\n- [ ] leite\n- [x] **café**"), cor: 0, aberto: true, fixo: true, posicao: None, excluido: false, confirmar: true, gravado: 0, lembrete: Some(1_800_000_000), menu_lembrete: false });
+            n.postits.push(PostIt { id: 77, conteudo: Content::with_text("Comprar pão\n- [ ] leite\n- [x] **café**"), cor: 0, aberto: true, fixo: true, posicao: None, excluido: false, confirmar: true, gravado: 0, lembrete: Some(1_800_000_000), menu_lembrete: false, quando: String::new() });
             let nota = capture(&n.view_window(WindowId(77)), Size::new(280.0, 280.0), 1.0, &n.theme(), &mut Renderer::new(), None);
             assert!(nota.len() > 2_000);
             if let Some(d) = std::env::var_os("FEATHERNOTES_CAPTURAR") {
                 std::fs::write(PathBuf::from(&d).join(format!("postit-{escuro}.png")), &nota).unwrap();
                 // A lista, com um na lixeira.
-                n.postits.push(PostIt { id: 78, conteudo: Content::with_text("## Reunião às 15h"), cor: 2, aberto: false, fixo: false, posicao: None, excluido: true, confirmar: false, gravado: 0, lembrete: None, menu_lembrete: false });
+                n.postits.push(PostIt { id: 78, conteudo: Content::with_text("## Reunião às 15h"), cor: 2, aberto: false, fixo: false, posicao: None, excluido: true, confirmar: false, gravado: 0, lembrete: None, menu_lembrete: false, quando: String::new() });
                 let (menu, conf, prop) = (std::mem::take(&mut n.menu), n.confirmar.take(), std::mem::take(&mut n.propriedades));
                 n.painel_postits = true;
                 std::fs::write(PathBuf::from(&d).join(format!("lista-{escuro}.png")), capture(&n.view(), Size::new(980.0, 680.0), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();

@@ -52,6 +52,76 @@ fn fuso() -> i64 {
     sistema::local(t).segundos() - (t - t.rem_euclid(60))
 }
 
+/// Uma data e hora do relógio local em segundos UTC.
+// shortcut: usa o fuso de agora; numa data depois de uma troca de horário de verão erra por 1 h. O Brasil não tem mais horário de verão.
+fn de_local(ano: i64, mes: u32, dia: u32, hora: u32, minuto: u32) -> i64 {
+    Local { ano, mes, dia, hora, minuto }.segundos() - fuso()
+}
+
+/// "sáb 15/11 às 14:30": como o lembrete foi entendido.
+pub fn descrever(t: i64) -> String {
+    let l = local(t);
+    let semana = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"][(dias(l.ano, l.mes, l.dia) + 4).rem_euclid(7) as usize];
+    format!("{semana} {:02}/{:02} às {:02}:{:02}", l.dia, l.mes, l.hora, l.minuto)
+}
+
+/// O que se escreve no lembrete: "15/11 14:30", "15/11/2027 9h", "amanhã 8h", "18:00" (hoje, ou
+/// amanhã se já passou), "15/11" (às 9h). `None` se não entendeu ou se já passou.
+pub fn interpretar(texto: &str, agora: i64) -> Option<i64> {
+    let hoje = local(agora);
+    let (mut data, mut horario) = (None, None);
+    for parte in texto.split_whitespace().map(str::to_lowercase) {
+        match parte.as_str() {
+            "hoje" => data = Some((hoje.ano, hoje.mes, hoje.dia)),
+            "amanhã" | "amanha" => {
+                let l = local(de_local(hoje.ano, hoje.mes, hoje.dia, 12, 0) + 86_400);
+                data = Some((l.ano, l.mes, l.dia));
+            }
+            p if p.contains('/') => {
+                let n: Vec<&str> = p.split('/').collect();
+                let (dia, mes) = (n.first()?.parse::<u32>().ok()?, n.get(1)?.parse::<u32>().ok()?);
+                let ano = match n.get(2) {
+                    Some(a) if a.len() == 2 => 2000 + a.parse::<i64>().ok()?,
+                    Some(a) => a.parse().ok()?,
+                    None => hoje.ano,
+                };
+                let dias_no_mes = (dias(if mes == 12 { ano + 1 } else { ano }, if mes == 12 { 1 } else { mes + 1 }, 1) - dias(ano, mes, 1)) as u32;
+                if !(1..=12).contains(&mes) || dia == 0 || dia > dias_no_mes || n.len() > 3 {
+                    return None;
+                }
+                data = Some((ano, mes, dia));
+            }
+            p => {
+                let (h, m) = p.split_once([':', 'h']).unwrap_or((p, ""));
+                let (h, m) = (h.parse::<u32>().ok()?, if m.is_empty() { 0 } else { m.parse::<u32>().ok()? });
+                if h > 23 || m > 59 {
+                    return None;
+                }
+                horario = Some((h, m));
+            }
+        }
+    }
+    let (h, m) = horario.unwrap_or((9, 0));
+    let t = match data {
+        Some((ano, mes, dia)) => de_local(ano, mes, dia, h, m),
+        None if horario.is_some() => {
+            // Só a hora: hoje, ou amanhã se já passou.
+            let t = de_local(hoje.ano, hoje.mes, hoje.dia, h, m);
+            if t > agora { t } else { t + 86_400 }
+        }
+        None => return None,
+    };
+    // 15/11 sem ano já passou este ano: é o do ano que vem.
+    let t = if t <= agora && data.is_some() && texto.matches('/').count() < 2 { local_ano_que_vem(t) } else { t };
+    (t > agora).then_some(t)
+}
+
+/// O mesmo dia e hora no ano seguinte.
+fn local_ano_que_vem(t: i64) -> i64 {
+    let l = local(t);
+    de_local(l.ano + 1, l.mes, l.dia, l.hora, l.minuto)
+}
+
 /// Amanhã às `hora` em ponto, em segundos UTC.
 pub fn amanha_as(hora: u32) -> i64 {
     let hoje = local(agora());
@@ -123,5 +193,24 @@ mod testes {
         assert!(amanha > agora() && amanha - agora() <= 33 * 3600);
         assert_eq!((local(amanha).hora, local(amanha).minuto), (9, 0));
         assert_eq!(Local { ano: 2026, mes: 11, dia: 2, hora: 9, minuto: 5 }.texto(), "02/11/2026 09:05");
+    }
+
+    #[test]
+    fn interpreta_o_que_se_escreve() {
+        // Segunda, 02/11/2026 às 14:00 no relógio local.
+        let agora = de_local(2026, 11, 2, 14, 0);
+        let ver = |t: &str| interpretar(t, agora).map(|t| local(t).texto());
+        assert_eq!(ver("15/11 14:30").as_deref(), Some("15/11/2026 14:30"));
+        assert_eq!(ver("15/11/27 9h").as_deref(), Some("15/11/2027 09:00"));
+        assert_eq!(ver("15/11").as_deref(), Some("15/11/2026 09:00"));
+        assert_eq!(ver("18:00").as_deref(), Some("02/11/2026 18:00"));
+        assert_eq!(ver("8h").as_deref(), Some("03/11/2026 08:00"), "já passou: amanhã");
+        assert_eq!(ver("Amanhã 8h30").as_deref(), Some("03/11/2026 08:30"));
+        assert_eq!(ver("1/2").as_deref(), Some("01/02/2027 09:00"), "sem ano e já passou: ano que vem");
+        assert_eq!(ver("01/11/2026 10:00"), None, "com ano e já passou");
+        for ruim in ["", "31/02", "25:00", "abc", "10:75", "1/2/3/4"] {
+            assert_eq!(ver(ruim), None, "{ruim}");
+        }
+        assert_eq!(descrever(de_local(2026, 11, 15, 14, 30)), "dom 15/11 às 14:30");
     }
 }
