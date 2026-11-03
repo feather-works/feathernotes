@@ -7,6 +7,7 @@ mod arquivo;
 mod cantos;
 mod codificacao;
 mod consumo;
+mod hora;
 mod instancia;
 mod json;
 
@@ -141,13 +142,17 @@ struct Aba {
     json: bool,
     /// Fechada (só na sessão): tem cópia de recuperação. Visto uma vez ao abrir o app, não a cada quadro.
     copia: bool,
+    /// A data de modificação do arquivo quando foi lido ou salvo: outra diferente = mudou fora do app.
+    modificado: Option<std::time::SystemTime>,
+    /// O arquivo mudou no disco e a aba tem alterações: o rodapé oferece recarregar.
+    mudou_fora: bool,
 }
 
 impl Aba {
     fn nova(id: u64, caminho: Option<PathBuf>) -> Self {
         let markdown = caminho.as_deref().is_some_and(eh_markdown);
         let json = caminho.as_deref().is_some_and(eh_json);
-        Aba { id, caminho, conteudo: None, salvo: Some(0), copiado: 0, cod: Cod::Utf8, cod_salva: None, quebra: Quebra::Lf, acentos_quebrados: false, converter: false, markdown, json, copia: false }
+        Aba { id, caminho, conteudo: None, salvo: Some(0), copiado: 0, cod: Cod::Utf8, cod_salva: None, quebra: Quebra::Lf, acentos_quebrados: false, converter: false, markdown, json, copia: false, modificado: None, mudou_fora: false }
     }
     fn nome(&self) -> String {
         self.caminho.as_ref().and_then(|p| p.file_name()).map_or(SEM_TITULO.into(), |n| n.to_string_lossy().into_owned())
@@ -175,8 +180,21 @@ struct PostIt {
     excluido: bool,
     /// O × num post-it com texto: a pergunta está à mostra.
     confirmar: bool,
+    /// Quando ele volta à tela sozinho (segundos UTC).
+    lembrete: Option<i64>,
+    /// As opções do lembrete (o relógio da barra) à mostra.
+    menu_lembrete: bool,
     /// A versão já gravada.
     gravado: u64,
+}
+
+impl PostIt {
+    /// A primeira linha com texto, sem os sinais de Markdown do começo (a lista e o lembrete).
+    fn resumo(&self) -> String {
+        let t = self.conteudo.text();
+        let primeira = t.lines().map(|l| l.trim_start_matches(['#', '-', '*', '>', ' ']).trim_start_matches("[ ] ").trim_start_matches("[x] ").replace("**", "")).find(|l| !l.trim().is_empty()).unwrap_or_default();
+        if primeira.chars().count() > 34 { primeira.chars().take(32).collect::<String>() + "…" } else { primeira }
+    }
 }
 
 /// (fundo, barra) de cada cor; o texto é sempre escuro, como no papel.
@@ -233,6 +251,8 @@ struct Notas {
     inicio_sistema: bool,
     /// O atalho do sistema que cria post-it está posto (só GNOME).
     atalho_postit: bool,
+    /// Os arquivos das abas fechadas, a última no fim: o Ctrl+Shift+T reabre.
+    fechadas: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +323,12 @@ enum Msg {
     Maximizar,
     Fechar,
     NovoPostIt,
+    /// Shift+Ctrl+N na janela principal: o post-it já vem com o texto selecionado.
+    PostItDaSelecao,
+    /// Ctrl+Shift+T: reabre a última aba fechada.
+    ReabrirFechada,
+    /// F5: a data e a hora no cursor.
+    DataHora,
     MostrarPostIts,
     /// Abrir ao iniciar o sistema; vem da configuração inicial ou do menu.
     IniciarComSistema(bool),
@@ -314,6 +340,10 @@ enum Msg {
     PostItMudou,
     PostItCor(u64),
     PostItFixar(u64),
+    /// O relógio da barra: mostra ou esconde as opções do lembrete.
+    PostItMenuLembrete(u64),
+    /// Marca (segundos UTC) ou tira o lembrete.
+    PostItLembrete(u64, Option<i64>),
     PostItArrastar(u64),
     PostItPuxar(u64, ResizeDirection),
     /// O × do post-it: com texto, pergunta antes.
@@ -392,8 +422,8 @@ impl Notas {
             abas.push(Aba::nova(proximo_id, None));
         }
         let escuro = escuro(prefs.tema);
-        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: cfg!(target_os = "linux") && arquivo::tem_atalho_postit() };
-        n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0 }).collect();
+        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: cfg!(target_os = "linux") && arquivo::tem_atalho_postit(), fechadas: Vec::new() };
+        n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido, lembrete }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0, lembrete, menu_lembrete: false }).collect();
         n.carregar(n.ativa);
         n
     }
@@ -407,6 +437,7 @@ impl Notas {
         let aba = &mut self.abas[i];
         let copia = arquivo::recuperacao(aba.id);
         let original = aba.caminho.as_ref().map(std::fs::read);
+        (aba.modificado, aba.mudou_fora) = (aba.caminho.as_deref().and_then(modificado_em), false);
         let (texto, salvo) = if let Ok(bytes) = std::fs::read(&copia) {
             // A cópia é sempre UTF-8; a codificação para salvar vem do arquivo original.
             aba.cod = match (aba.cod_salva, &original) {
@@ -492,7 +523,9 @@ impl Notas {
     fn fechar_aba(&mut self, id: u64) {
         let Some(i) = self.abas.iter().position(|a| a.id == id) else { return };
         let _ = std::fs::remove_file(arquivo::recuperacao(id));
-        self.abas.remove(i);
+        if let Some(p) = self.abas.remove(i).caminho {
+            self.fechadas.push(p);
+        }
         if self.abas.is_empty() {
             self.abas.push(Aba::nova(self.proximo_id, None));
             self.proximo_id += 1;
@@ -538,7 +571,7 @@ impl Notas {
                 }
             }
         }
-        let lista: Vec<PostItSalvo> = self.postits.iter().map(|p| PostItSalvo { id: p.id, cor: p.cor, aberto: p.aberto, fixo: p.fixo, posicao: p.posicao, excluido: p.excluido }).collect();
+        let lista: Vec<PostItSalvo> = self.postits.iter().map(|p| PostItSalvo { id: p.id, cor: p.cor, aberto: p.aberto, fixo: p.fixo, posicao: p.posicao, excluido: p.excluido, lembrete: p.lembrete }).collect();
         if let Err(e) = arquivo::gravar_postits(&lista) {
             self.aviso = Some(format!("Não guardou os post-its: {e}"));
         }
@@ -563,8 +596,53 @@ impl Notas {
         } else {
             self.postits[i].aberto = false;
             self.postits[i].excluido = excluir;
+            // Na lixeira, não lembra.
+            if excluir {
+                self.postits[i].lembrete = None;
+            }
         }
         self.guardar_postits();
+    }
+
+    /// Os post-its cujo lembrete chegou voltam à tela (abrem, ou vêm para a frente) e, no Linux,
+    /// avisam também por notificação do sistema (no Wayland a janela aberta só pisca na barra).
+    fn lembretes(&mut self) -> Task<Msg> {
+        let agora = hora::agora();
+        let hora: Vec<usize> = (0..self.postits.len()).filter(|&i| self.postits[i].lembrete.is_some_and(|t| t <= agora) && !self.postits[i].excluido).collect();
+        if hora.is_empty() {
+            return Task::none();
+        }
+        let mut tarefas = Vec::new();
+        for i in hora {
+            let p = &mut self.postits[i];
+            p.lembrete = None;
+            // Preso no fundo da tela ele não apareceria: solta.
+            if std::mem::take(&mut p.fixo) {
+                tarefas.push(Task::window_of(WindowId(p.id), WindowCmd::Level(WindowLevel::Normal)));
+            }
+            let id = p.id;
+            #[cfg(all(target_os = "linux", not(test)))]
+            let _ = std::process::Command::new("notify-send").args(["-a", "FeatherNotes", "-i", "feathernotes", "Lembrete", &p.resumo()]).spawn();
+            tarefas.push(if p.aberto { Task::window_of(WindowId(id), WindowCmd::Focus) } else { self.abrir_postit(i) });
+        }
+        self.guardar_postits();
+        Task::batch(tarefas)
+    }
+
+    /// Um post-it novo, aberto, com `texto` (vazio, ou o selecionado na aba).
+    fn novo_postit(&mut self, texto: &str) -> Task<Msg> {
+        self.menu = false;
+        let id = self.postits.iter().map(|p| p.id + 1).max().unwrap_or(1);
+        // A cor seguinte à do último: post-its novos não ficam todos iguais.
+        let cor = self.postits.last().map_or(0, |p| (p.cor + 1) % CORES_POSTIT.len());
+        self.postits.push(PostIt { id, conteudo: Content::with_text(texto), cor, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0, lembrete: None, menu_lembrete: false });
+        let t = self.abrir_postit(self.postits.len() - 1);
+        // Com texto, ele já vai para o disco (a versão 0 conta como gravada).
+        if !texto.is_empty() {
+            self.postits.last_mut().expect("acabou de entrar").gravado = u64::MAX;
+        }
+        self.guardar_postits();
+        t
     }
 
     fn apagar_postit(&mut self, i: usize) {
@@ -579,12 +657,7 @@ impl Notas {
             container(column(filhos)).width(Length::FILL).style(caixa(c.papel, Border::rounded(10.0).color(c.borda, 1.0)))
         }
         let bolinha = |cor: usize| container(Space::new(12.0, 12.0)).style(caixa(Color::hex(CORES_POSTIT[cor].1).expect("cor"), Border::rounded(6.0)));
-        let resumo = |p: &PostIt| {
-            let t = p.conteudo.text();
-            // A primeira linha com texto, sem os sinais de Markdown do começo.
-            let primeira = t.lines().map(|l| l.trim_start_matches(['#', '-', '*', '>', ' ']).trim_start_matches("[ ] ").trim_start_matches("[x] ").replace("**", "")).find(|l| !l.trim().is_empty()).unwrap_or_default();
-            if primeira.chars().count() > 34 { primeira.chars().take(32).collect::<String>() + "…" } else { primeira }
-        };
+        let resumo = PostIt::resumo;
         let mut vivos: Vec<Element<'_, Msg>> = Vec::new();
         for p in self.postits.iter().filter(|p| !p.excluido) {
             if !vivos.is_empty() {
@@ -637,6 +710,17 @@ impl Notas {
             cor,
             mouse_area(Space::new(Length::FILL, 26.0)).on_press(Msg::PostItArrastar(id)),
             tooltip(
+                button(container(traco(ICONE_RELOGIO, 14.0, if p.lembrete.is_some() { tinta } else { tinta.alpha(0.45) })).center()).on_press(Msg::PostItMenuLembrete(id)).width(28.0).height(26.0).padding(0.0).style(move |t, s| {
+                    let mut st = sobre(t, s);
+                    if p.lembrete.is_some() {
+                        st.background = Some(tinta.alpha(0.14).into());
+                    }
+                    st
+                }),
+                p.lembrete.map_or("Lembrar depois".to_string(), |t| format!("Lembra em {}", hora::local(t).texto())),
+                TooltipPosition::Bottom
+            ),
+            tooltip(
                 button(container(traco(ICONE_ALFINETE, 14.0, if p.fixo { tinta } else { tinta.alpha(0.45) })).center()).on_press(Msg::PostItFixar(id)).width(28.0).height(26.0).padding(0.0).style(move |t, s| {
                     let mut st = sobre(t, s);
                     if p.fixo {
@@ -668,6 +752,26 @@ impl Notas {
         let alca = |d: ResizeDirection| mouse_area(Space::new(14.0, 14.0)).on_press(Msg::PostItPuxar(id, d)).cursor_icon(CursorIcon::SeResize);
         let canto = container(alca(ResizeDirection::SouthEast)).width(Length::FILL).height(Length::FILL).align_x(Align::End).align_y(Align::End);
         let mut camadas = stack![corpo, canto];
+        if p.menu_lembrete {
+            let agora = hora::agora();
+            let opcao = |rotulo: &'static str, quando: Option<i64>| button(text(rotulo).size(12).color(tinta)).on_press(Msg::PostItLembrete(id, quando)).width(Length::FILL).padding([5u16, 8]).style(sobre);
+            let cartao = container(
+                column![
+                    text(p.lembrete.map_or("Lembrar de novo:".to_string(), |t| format!("Lembra em {}", hora::local(t).texto()))).size(13).font(Font::SEMIBOLD).color(tinta),
+                    opcao("Em 15 minutos", Some(agora + 15 * 60)),
+                    opcao("Em 1 hora", Some(agora + 3600)),
+                    opcao("Em 3 horas", Some(agora + 3 * 3600)),
+                    opcao("Amanhã às 9h", Some(hora::amanha_as(9))),
+                ]
+                .push_maybe(p.lembrete.map(|_| opcao("Tirar o lembrete", None)))
+                .spacing(2),
+            )
+            .padding(10.0)
+            .width(Length::FILL)
+            .style(move |_| Style::default().background(fundo).border(Border::rounded(8.0).color(tinta.alpha(0.25), 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.18), offset: Point::new(0.0, 4.0), blur: 14.0 }));
+            let veu = container(Space::new(Length::FILL, Length::FILL)).style(caixa(tinta.alpha(0.12), Border::rounded(RAIO_JANELA)));
+            camadas = camadas.push(stack![mouse_area(veu).on_press(Msg::PostItMenuLembrete(id)), container(cartao).width(Length::FILL).height(Length::FILL).padding(12.0).center()]);
+        }
         if p.confirmar {
             let resposta = |rotulo, r: Option<bool>, cor: Color, fundo: Option<Color>| {
                 button(text(rotulo).size(12).color(cor)).on_press(Msg::PostItResposta(id, r)).padding([5u16, 10]).style(move |t, s| {
@@ -713,6 +817,15 @@ impl Notas {
                 texto = texto.replace('\n', aba.quebra.str());
             }
         }
+        // Outro programa mudou o arquivo: a primeira tentativa avisa, a segunda grava por cima.
+        if aba.caminho.as_ref() == Some(&caminho) {
+            let agora = modificado_em(&caminho);
+            if agora.is_some() && aba.modificado.is_some() && agora != aba.modificado {
+                (aba.modificado, aba.mudou_fora) = (agora, true);
+                self.aviso = Some("O arquivo mudou no disco depois que abriu. Salve de novo para gravar por cima, ou recarregue.".into());
+                return false;
+            }
+        }
         // Nada some em silêncio: caractere que não cabe na codificação impede salvar.
         let bytes = match aba.cod.gravar(&texto) {
             Ok(b) => b,
@@ -725,6 +838,7 @@ impl Notas {
         match arquivo::gravar(&caminho, &bytes) {
             Ok(()) => {
                 aba.salvo = Some(c.version());
+                (aba.modificado, aba.mudou_fora) = (modificado_em(&caminho), false);
                 if aba.caminho.as_ref() != Some(&caminho) {
                     aba.markdown = eh_markdown(&caminho);
                     aba.json = eh_json(&caminho);
@@ -796,11 +910,32 @@ impl Notas {
                 aba.conteudo = Some(Content::with_text(&texto));
                 aba.salvo = Some(0);
                 aba.converter = false;
+                (aba.modificado, aba.mudou_fora) = (modificado_em(&p), false);
                 self.esquecer_contagens();
                 self.aviso = ruim.then(|| format!("Alguns bytes não fazem sentido em {}: viraram �", cod.nome()));
             }
             Err(e) => self.aviso = Some(format!("Não abriu: {e}")),
         }
+    }
+
+    /// O arquivo da aba ativa mudou no disco (log que cresce, config que outro programa reescreveu)?
+    /// Sem alterações aqui, recarrega no mesmo lugar; com elas, só marca para o rodapé avisar.
+    fn conferir_disco(&mut self) {
+        let aba = &mut self.abas[self.ativa];
+        let (Some(p), Some(c)) = (aba.caminho.clone(), &aba.conteudo) else { return };
+        let agora = modificado_em(&p);
+        // Sumiu (pendrive fora, apagado) ou não mudou: nada a fazer.
+        if agora.is_none() || agora == aba.modificado || aba.mudou_fora {
+            return;
+        }
+        if aba.alterada() {
+            aba.mudou_fora = true;
+            return;
+        }
+        let (linha, cod) = (c.cursor().0, aba.cod);
+        self.reabrir(Some(cod));
+        self.conteudo().go_to_line(linha);
+        self.aviso = Some("Recarregado: o arquivo mudou no disco".into());
     }
 
     fn mudar_prefs(&mut self, f: impl FnOnce(&mut Preferencias)) {
@@ -830,6 +965,11 @@ fn lembrar<T: Clone>(cache: &Lembrado<T>, chave: (u64, u64), calcular: impl FnOn
 fn abrir_no_sistema(alvo: impl AsRef<std::ffi::OsStr>) -> std::io::Result<std::process::Child> {
     let programa = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     std::process::Command::new(programa).arg(alvo).spawn()
+}
+
+/// A data de modificação do arquivo; `None` se não existe ou não deu para ler.
+fn modificado_em(p: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
 fn eh_markdown(p: &std::path::Path) -> bool {
@@ -912,6 +1052,7 @@ const ICONE_LINK: &str = r#"<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1
 const ICONE_TABELA: &str = r#"<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M4 14.5h16M10 5v14"/>"#;
 const ICONE_TAREFA: &str = r#"<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>"#;
 const ICONE_CERTO: &str = r#"<path d="M5 12.5l4.5 4.5L19 7.5" stroke-width="3"/>"#;
+const ICONE_RELOGIO: &str = r#"<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M5 4L2.5 6.5M19 4l2.5 2.5"/>"#;
 const ICONE_ALFINETE: &str = r#"<path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 15v5"/>"#;
 const ICONE_PASTA: &str = r#"<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"#;
 
@@ -1277,11 +1418,13 @@ impl Notas {
         if !self.abas[self.ativa].markdown {
             return None;
         }
+        // Janela estreita: botões mais justos, para a barra caber inteira.
+        let largura = if self.compacta() { 28.0 } else { 34.0 };
         let b = |rotulo: &'static str, fonte: Font, f: Formato, dica: &'static str| {
-            tooltip(button(container(text(rotulo).size(13).font(fonte).color(c.texto)).center()).on_press(Msg::Formatar(f)).width(34.0).height(28.0).padding(0.0).style(plano(c, false)), dica, TooltipPosition::Bottom)
+            tooltip(button(container(text(rotulo).size(13).font(fonte).color(c.texto)).center()).on_press(Msg::Formatar(f)).width(largura).height(28.0).padding(0.0).style(plano(c, false)), dica, TooltipPosition::Bottom)
         };
         let icone = |caminho: &'static str, f: Formato, dica: &'static str| {
-            tooltip(button(container(traco(caminho, 16.0, c.texto)).center()).on_press(Msg::Formatar(f)).width(34.0).height(28.0).padding(0.0).style(plano(c, false)), dica, TooltipPosition::Bottom)
+            tooltip(button(container(traco(caminho, 16.0, c.texto)).center()).on_press(Msg::Formatar(f)).width(largura).height(28.0).padding(0.0).style(plano(c, false)), dica, TooltipPosition::Bottom)
         };
         let fio = || container(Space::new(1.0, 18.0)).style(caixa(c.borda, Border::default()));
         let linha = row![
@@ -1302,7 +1445,7 @@ impl Notas {
         ]
         .spacing(2)
         .align(Align::Center)
-        .padding([4u16, 14]);
+        .padding([4u16, if self.compacta() { 6 } else { 14 }]);
         Some(container(linha).width(Length::FILL).style(caixa(c.papel, Border::default())).into())
     }
 
@@ -1358,12 +1501,17 @@ impl Notas {
         // A palavra selecionada é suspeita: quais letras estão disfarçadas.
         let selecao = conteudo.selection();
         let sob_cursor = sob_cursor.or_else(|| suspeitas.into_iter().find(|s| selecao.as_deref() == Some(&s.palavra)).map(|s| item(s.resumo)));
-        let linha = row![clicavel(format!("Ln {ln}, Col {col}"), Msg::IrPara), item(self.recursos.clone())]
+        let linha = row![clicavel(format!("Ln {ln}, Col {col}"), Msg::IrPara)]
+            .push_maybe((!self.compacta()).then(|| item(self.recursos.clone())))
             .push_maybe(sob_cursor)
             .push_maybe(aviso_ocultos)
             .push_maybe(aviso_suspeitas)
             .push(horizontal_space())
             .push_maybe(self.aviso.as_ref().map(|a| item(a.clone())))
+            .push_maybe(aba.mudou_fora.then(|| {
+                let b = button(text("Mudou no disco · Recarregar").size(12).color(Color::rgb8(0xe8, 0x71, 0x0a))).on_press(Msg::Descartar).padding([3u16, 8]).style(plano(c, false));
+                tooltip(b, "Troca o texto da aba pelo do disco (o que você mudou aqui se perde)", TooltipPosition::Top)
+            }))
             .push_maybe(aba.acentos_quebrados.then(|| button(text("Acentos quebrados (Ã£)? Consertar").size(12).color(Color::rgb8(0xe8, 0x71, 0x0a))).on_press(Msg::ConsertarAcentos).padding([3u16, 8]).style(plano(c, false))))
             .push(clicavel(aba.cod.nome().into(), Msg::MenuCod(Some(false))))
             .push(clicavel(aba.quebra.nome().into(), Msg::Propriedades))
@@ -1440,7 +1588,7 @@ impl Notas {
         let atalho = cfg!(target_os = "linux").then(|| self.linha_atalho(c));
         let descartar = (aba.caminho.is_some() && aba.alterada()).then_some(Msg::Descartar);
         let cartao = container(
-            column![
+            scrollable(column![
                 temas,
                 separador(),
                 zoom,
@@ -1468,6 +1616,10 @@ impl Notas {
             ]
             .push_maybe(atalho)
             .spacing(1),
+        )
+        // Janela baixa: o menu rola em vez de ser cortado embaixo.
+        .height(Length::Shrink)
+        .max_height((self.altura - ALTURA_BARRA - 12.0).max(120.0)),
         )
         .padding(6.0)
         .width(300.0)
@@ -1699,6 +1851,8 @@ impl App for Notas {
                 };
                 self.cpu_antes = agora;
                 self.recursos = format!("RAM {} MB{cpu}", consumo::rss_kb().unwrap_or(0).div_ceil(1024));
+                self.conferir_disco();
+                return self.lembretes();
             }
             Msg::Fonte_(f) => self.mudar_prefs(|p| p.fonte = f),
             Msg::Markdown(m) => {
@@ -1962,8 +2116,10 @@ impl App for Notas {
                 return t;
             }
             Msg::Esc => {
-                if self.confirmar.take().is_none() && !std::mem::take(&mut self.menu) && self.menu_cod.take().is_none() && self.ir_para.take().is_none() {
-                    self.busca = None;
+                // Janela estreita: o painel por cima do editor também fecha com Esc.
+                let painel = self.compacta() && (self.propriedades || self.painel_postits);
+                if self.confirmar.take().is_none() && !std::mem::take(&mut self.menu) && self.menu_cod.take().is_none() && self.ir_para.take().is_none() && self.busca.take().is_none() && painel {
+                    (self.propriedades, self.painel_postits) = (false, false);
                 }
                 self.foco += 1;
             }
@@ -1996,15 +2152,19 @@ impl App for Notas {
                 Err(e) => self.aviso = Some(format!("Não deu para mudar o atalho: {e}")),
             },
             Msg::Configurado => self.mudar_prefs(|p| p.configurado = true),
-            Msg::NovoPostIt => {
-                self.menu = false;
-                let id = self.postits.iter().map(|p| p.id + 1).max().unwrap_or(1);
-                // A cor seguinte à do último: post-its novos não ficam todos iguais.
-                let cor = self.postits.last().map_or(0, |p| (p.cor + 1) % CORES_POSTIT.len());
-                self.postits.push(PostIt { id, conteudo: Content::new(), cor, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0 });
-                let t = self.abrir_postit(self.postits.len() - 1);
-                self.guardar_postits();
-                return t;
+            Msg::NovoPostIt => return self.novo_postit(""),
+            Msg::PostItDaSelecao => {
+                let texto = self.conteudo().selection().unwrap_or_default();
+                return self.novo_postit(&texto);
+            }
+            Msg::ReabrirFechada => {
+                if let Some(p) = self.fechadas.pop() {
+                    return self.update(Msg::Abertos(vec![p]));
+                }
+            }
+            Msg::DataHora => {
+                self.conteudo().insert(&hora::local(hora::agora()).texto());
+                return self.mudou();
             }
             Msg::MostrarPostIts => {
                 self.menu = false;
@@ -2026,6 +2186,17 @@ impl App for Notas {
                 let nivel = if p.fixo { WindowLevel::AlwaysOnBottom } else { WindowLevel::Normal };
                 self.guardar_postits();
                 return Task::window_of(WindowId(id), WindowCmd::Level(nivel));
+            }
+            Msg::PostItMenuLembrete(id) => {
+                if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
+                    p.menu_lembrete = !p.menu_lembrete;
+                }
+            }
+            Msg::PostItLembrete(id, quando) => {
+                if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
+                    (p.lembrete, p.menu_lembrete) = (quando, false);
+                }
+                self.guardar_postits();
             }
             Msg::PostItArrastar(id) => return Task::window_of(WindowId(id), WindowCmd::Drag),
             Msg::PostItPuxar(id, d) => return Task::window_of(WindowId(id), WindowCmd::DragResize(d)),
@@ -2125,6 +2296,7 @@ impl App for Notas {
             return match ev {
                 Event::CloseRequested => Some(Msg::Fechar),
                 Event::Resized(s) => Some(Msg::Tamanho(*s)),
+                Event::FileDropped(p) => Some(Msg::Abertos(vec![p.clone()])),
                 Event::Wheel { dy, modifiers, .. } if modifiers.control_key() => {
                     let soma = self.zoom.get() + dy;
                     self.zoom.set(if soma.abs() >= 40.0 { 0.0 } else { soma });
@@ -2137,6 +2309,7 @@ impl App for Notas {
             Key::Named(NamedKey::Enter) if modifiers.alt_key() => return Some(Msg::Propriedades),
             Key::Named(NamedKey::Escape) => return Some(Msg::Esc),
             Key::Named(NamedKey::F11) => return Some(Msg::TelaCheia),
+            Key::Named(NamedKey::F5) => return Some(Msg::DataHora),
             _ => {}
         }
         if !(modifiers.control_key() || modifiers.super_key()) {
@@ -2146,7 +2319,8 @@ impl App for Notas {
         match key {
             Key::Named(NamedKey::Tab) => Some(Msg::ProximaAba),
             Key::Character(k) => match k.to_lowercase().as_str() {
-                "n" if shift => Some(Msg::NovoPostIt),
+                "n" if shift => Some(Msg::PostItDaSelecao),
+                "t" if shift => Some(Msg::ReabrirFechada),
                 "n" | "t" => Some(Msg::Nova),
                 "o" => Some(Msg::Abrir),
                 "q" => Some(Msg::Sair),
@@ -2206,9 +2380,16 @@ impl App for Notas {
         };
         let topo = container(self.barra(c)).width(Length::FILL).style(move |_| Style::default().background(c.barra).backdrop_blur(20.0));
         let linha = || container(Space::new(Length::FILL, 1.0)).style(caixa(c.borda, Border::default()));
-        let meio = row![column![].push_maybe(self.formatos(c)).push_maybe(self.barra_json(c)).push(editor).width(Length::FILL).height(Length::FILL)].push_maybe(if self.painel_postits { Some(self.lista_postits(c)) } else { self.propriedades.then(|| self.propriedades(c)) }).height(Length::FILL);
+        let painel = if self.painel_postits { Some(self.lista_postits(c)) } else { self.propriedades.then(|| self.propriedades(c)) };
+        // Janela estreita: o painel abre por cima do editor (ao lado, o editor virava uma tira).
+        let (ao_lado, por_cima) = if self.compacta() { (None, painel) } else { (painel, None) };
+        let meio = row![column![].push_maybe(self.formatos(c)).push_maybe(self.barra_json(c)).push(editor).width(Length::FILL).height(Length::FILL)].push_maybe(ao_lado).height(Length::FILL);
         let corpo = column![topo, meio, linha(), self.rodape(c)];
-        let mut camadas = stack![corpo, self.alcas()];
+        let mut camadas = stack![corpo];
+        if let Some(p) = por_cima {
+            camadas = camadas.push(container(p).width(Length::FILL).height(Length::FILL).align_x(Align::End).padding(Padding { top: ALTURA_BARRA, bottom: 31.0, ..Padding::ZERO }));
+        }
+        camadas = camadas.push(self.alcas());
         if let Some(b) = self.ir_para(c).or_else(|| self.busca(c)) {
             camadas = camadas.push(b);
         }
@@ -2352,9 +2533,70 @@ mod testes {
         assert!(!n.abas[n.ativa].alterada());
         #[cfg(unix)]
         assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&arq).unwrap().permissions()) & 0o777, 0o755);
+        // Outro programa reescreve o arquivo (a data muda): a aba sem alterações recarrega sozinha.
+        let mudar_fora = |t: &str, segundos: u64| {
+            std::fs::write(&arq, t).unwrap();
+            let f = std::fs::File::options().write(true).open(&arq).unwrap();
+            f.set_modified(std::time::SystemTime::now() + Duration::from_secs(segundos)).unwrap();
+        };
+        mudar_fora("de fora", 10);
+        n.conferir_disco();
+        assert_eq!(n.conteudo().text(), "de fora");
+        // Com alterações aqui: só marca; o primeiro Salvar avisa, o segundo grava por cima.
+        n.conteudo().insert("meu ");
+        mudar_fora("de fora 2", 20);
+        n.conferir_disco();
+        let meu = n.conteudo().text();
+        assert!(n.abas[n.ativa].mudou_fora && meu.contains("meu"), "{meu}");
+        let id = n.abas[n.ativa].id;
+        assert!(!n.salvar(id, arq.clone()), "avisa antes de gravar por cima");
+        assert_eq!(std::fs::read_to_string(&arq).unwrap(), "de fora 2");
+        assert!(n.salvar(id, arq.clone()));
+        assert_eq!(std::fs::read_to_string(&arq).unwrap(), meu);
+        assert!(!n.abas[n.ativa].mudou_fora);
         let _ = n.update(Msg::Abertos(vec![pasta.join("nao-existe.txt")]));
         assert!(!n.abas[n.ativa].alterada() && n.conteudo().text().is_empty());
         let _ = std::fs::remove_dir_all(&pasta);
+    }
+
+    #[test]
+    #[ignore]
+    fn ver_telas() {
+        let d = PathBuf::from(std::env::var_os("VER").unwrap());
+        let mut n = Notas::novo();
+        n.prefs.configurado = true;
+        n.abas[n.ativa].markdown = true;
+        n.abas[n.ativa].conteudo = Some(Content::with_text("# Título\nTexto **negrito** e uma lista\n- item"));
+        for (nome, w, h, menu, prop) in [("menu-baixo", 600.0, 360.0, true, false), ("menu-alto", 980.0, 680.0, true, false), ("estreita", 440.0, 600.0, false, false), ("estreita-prop", 440.0, 600.0, false, true)] {
+            (n.largura, n.altura, n.menu, n.propriedades) = (w, h, menu, prop);
+            std::fs::write(d.join(format!("{nome}.png")), capture(&n.view(), Size::new(w, h), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
+        }
+        n.postits.push(PostIt { id: 90, conteudo: Content::with_text("Pagar boleto"), cor: 0, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0, lembrete: Some(hora::agora() + 3600), menu_lembrete: true });
+        std::fs::write(d.join("postit-lembrete.png"), capture(&n.view_window(WindowId(90)), Size::new(280.0, 280.0), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
+    }
+
+    /// O lembrete que chegou abre o post-it fechado, solta o alfinete e some; o da lixeira não toca.
+    #[test]
+    fn lembrete_reabre_o_postit() {
+        let mut n = Notas::novo();
+        let _ = n.update(Msg::NovoPostIt);
+        let id = n.postits.last().unwrap().id;
+        n.postits.last_mut().unwrap().conteudo = Content::with_text("Pagar boleto");
+        let _ = n.update(Msg::PostItResposta(id, Some(false)));
+        let p = n.postits.iter_mut().find(|p| p.id == id).unwrap();
+        assert!(!p.aberto);
+        p.fixo = true;
+        let _ = n.update(Msg::PostItLembrete(id, Some(hora::agora() + 3600)));
+        let _ = n.update(Msg::Medir);
+        assert!(!n.postits.iter().find(|p| p.id == id).unwrap().aberto, "ainda não chegou a hora");
+        let _ = n.update(Msg::PostItLembrete(id, Some(hora::agora() - 1)));
+        let _ = n.update(Msg::Medir);
+        let p = n.postits.iter().find(|p| p.id == id).unwrap();
+        assert!(p.aberto && !p.fixo && p.lembrete.is_none());
+        // Na lixeira o lembrete vai embora.
+        let _ = n.update(Msg::PostItLembrete(id, Some(hora::agora() - 1)));
+        let _ = n.update(Msg::PostItResposta(id, Some(true)));
+        assert!(n.postits.iter().find(|p| p.id == id).unwrap().lembrete.is_none());
     }
 
     /// Link que não é da web nem e-mail não abre: só avisa.
@@ -2419,13 +2661,13 @@ mod testes {
                 (n.prefs.configurado, n.confirmar) = (antes, conf);
             }
             // O post-it desenha na janela dele.
-            n.postits.push(PostIt { id: 77, conteudo: Content::with_text("Comprar pão\n- [ ] leite\n- [x] **café**"), cor: 0, aberto: true, fixo: true, posicao: None, excluido: false, confirmar: true, gravado: 0 });
+            n.postits.push(PostIt { id: 77, conteudo: Content::with_text("Comprar pão\n- [ ] leite\n- [x] **café**"), cor: 0, aberto: true, fixo: true, posicao: None, excluido: false, confirmar: true, gravado: 0, lembrete: Some(1_800_000_000), menu_lembrete: false });
             let nota = capture(&n.view_window(WindowId(77)), Size::new(280.0, 280.0), 1.0, &n.theme(), &mut Renderer::new(), None);
             assert!(nota.len() > 2_000);
             if let Some(d) = std::env::var_os("FEATHERNOTES_CAPTURAR") {
                 std::fs::write(PathBuf::from(&d).join(format!("postit-{escuro}.png")), &nota).unwrap();
                 // A lista, com um na lixeira.
-                n.postits.push(PostIt { id: 78, conteudo: Content::with_text("## Reunião às 15h"), cor: 2, aberto: false, fixo: false, posicao: None, excluido: true, confirmar: false, gravado: 0 });
+                n.postits.push(PostIt { id: 78, conteudo: Content::with_text("## Reunião às 15h"), cor: 2, aberto: false, fixo: false, posicao: None, excluido: true, confirmar: false, gravado: 0, lembrete: None, menu_lembrete: false });
                 let (menu, conf, prop) = (std::mem::take(&mut n.menu), n.confirmar.take(), std::mem::take(&mut n.propriedades));
                 n.painel_postits = true;
                 std::fs::write(PathBuf::from(&d).join(format!("lista-{escuro}.png")), capture(&n.view(), Size::new(980.0, 680.0), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
