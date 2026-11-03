@@ -223,8 +223,9 @@ impl PostIt {
 const CORES_POSTIT: [(&str, &str); 5] = [("#fff3a6", "#f7e47c"), ("#d4f5c9", "#b9eaa8"), ("#ffd6e0", "#ffbccd"), ("#d3e9ff", "#b5d9ff"), ("#e6dcff", "#d3c4ff")];
 const TINTA_POSTIT: &str = "#3b3522";
 const TAMANHO_POSTIT: Size = Size::new(280.0, 280.0);
-/// A altura mínima com o calendário do lembrete aberto (só enquanto ele está à mostra).
-const ALTURA_CALENDARIO: f32 = 400.0;
+/// A altura em que o calendário do lembrete cabe: a do post-it novo. Só um post-it que a pessoa
+/// encolheu cresce até ela, e volta depois.
+const ALTURA_CALENDARIO: f32 = 280.0;
 const MESES: [&str; 12] = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
 
 struct Busca {
@@ -840,12 +841,12 @@ impl Notas {
                 .spacing(8)
                 .into(),
             };
+            let aberto = p.calendario.is_some();
             let cartao = container(
-                column![
-                    titulo,
-                    meio,
-                    campo,
-                ]
+                column![]
+                    .push_maybe((!aberto).then_some(titulo))
+                    .push(meio)
+                    .push(campo)
                 .push_maybe(leitura)
                 .push_maybe(tirar)
                 .spacing(8),
@@ -854,8 +855,9 @@ impl Notas {
             .width(Length::FILL)
             .style(move |_| Style::default().background(fundo).border(Border::rounded(10.0).color(tinta.alpha(0.12), 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.12), offset: Point::new(0.0, 4.0), blur: 16.0 }));
             let veu = container(Space::new(Length::FILL, Length::FILL)).style(caixa(tinta.alpha(0.08), Border::rounded(RAIO_JANELA)));
-            // No alto: o calendário abre embaixo do campo, no espaço que o post-it ganhou.
-            camadas = camadas.push(stack![mouse_area(veu).on_press(Msg::PostItMenuLembrete(id)), container(cartao).width(Length::FILL).height(Length::FILL).padding(Padding { top: 36.0, right: 12.0, bottom: 12.0, left: 12.0 }).align_x(Align::Center)]);
+            // Com o calendário, o cartão sobe por cima da barra: tudo cabe no post-it de 280 × 280.
+            let topo = if aberto { 8.0 } else { 36.0 };
+            camadas = camadas.push(stack![mouse_area(veu).on_press(Msg::PostItMenuLembrete(id)), container(cartao).width(Length::FILL).height(Length::FILL).padding(Padding { top: topo, right: 10.0, bottom: 8.0, left: 10.0 }).align_x(Align::Center)]);
         }
         if p.confirmar {
             let resposta = |rotulo, r: Option<bool>, cor: Color, fundo: Option<Color>| {
@@ -1056,22 +1058,22 @@ fn calendario<'a>(id: u64, ano: i32, mes: u8, escolhido: Option<pelicano::Date>,
     let semana = row![letra("D"), letra("S"), letra("T"), letra("Q"), letra("Q"), letra("S"), letra("S")];
     let primeiro = pelicano::Date::new(ano, mes, 1).expect("dia 1").weekday();
     let total = pelicano::days_in_month(ano, mes);
-    let mut grade = column![topo, semana].spacing(2);
+    let mut grade = column![topo, semana].spacing(1);
     // Só as semanas que o mês usa (4 a 6).
     for semana in 0..(primeiro + total).div_ceil(7) {
-        let mut linha = row![].spacing(2);
+        let mut linha = row![].spacing(1);
         for k in 0..7u8 {
             let n = (semana * 7 + k + 1).checked_sub(primeiro + 1).map(|d| d + 1).filter(|&d| d <= total);
             linha = linha.push(match n.and_then(|d| pelicano::Date::new(ano, mes, d)) {
-                None => Element::from(Space::new(Length::FILL, 24.0)),
+                None => Element::from(Space::new(Length::FILL, 22.0)),
                 Some(d) => {
                     let (marcado, passado) = (escolhido == Some(d), d < hoje);
                     let cor = if marcado { fundo } else if passado { tinta.alpha(0.3) } else { tinta };
                     button(container(text(d.day.to_string()).size(11).color(cor)).width(Length::FILL).align_x(Align::Center))
                         .on_press_maybe((!passado).then_some(Msg::PostItData(id, d)))
                         .width(Length::FILL)
-                        .height(24.0)
-                        .padding([5u16, 0])
+                        .height(22.0)
+                        .padding([4u16, 0])
                         .style(move |_, s| Style {
                             background: if marcado { Some(tinta.into()) } else { matches!(s, Status::Hovered | Status::Pressed).then(|| tinta.alpha(0.1).into()) },
                             border: if d == hoje && !marcado { Border::rounded(12.0).color(tinta.alpha(0.5), 1.0) } else { Border::rounded(12.0) },
@@ -2775,7 +2777,13 @@ mod testes {
         let _ = n.update(Msg::PostItMenuLembrete(id));
         assert_eq!(n.postits.iter().find(|p| p.id == id).unwrap().antes, None, "abrir o cartão não cresce");
         let _ = n.update(Msg::PostItCalendario(id));
-        assert_eq!(n.postits.iter().find(|p| p.id == id).unwrap().antes, Some(TAMANHO_POSTIT));
+        assert_eq!(n.postits.iter().find(|p| p.id == id).unwrap().antes, None, "no tamanho padrão o calendário cabe");
+        let _ = n.update(Msg::PostItCalendario(id));
+        // Encolhido pela pessoa: cresce só até o padrão, e volta.
+        let pequeno = Size::new(200.0, 160.0);
+        let _ = n.update(Msg::PostItTamanho(id, pequeno));
+        let _ = n.update(Msg::PostItCalendario(id));
+        assert_eq!(n.postits.iter().find(|p| p.id == id).unwrap().antes, Some(pequeno));
         let _ = n.update(Msg::PostItMes(id, -11));
         let _ = n.update(Msg::PostItData(id, pelicano::Date::new(2099, 1, 2).unwrap()));
         let p = n.postits.iter().find(|p| p.id == id).unwrap();
