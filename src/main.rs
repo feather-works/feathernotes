@@ -77,6 +77,11 @@ fn janela_principal(escondida: bool) -> Settings {
 
 fn main() -> Result<(), Error> {
     // `--postit`: o atalho do sistema; só abre um post-it (no que já está aberto, se houver).
+    // `--version`: só diz a versão (antes de procurar o FeatherNotes aberto, que tomaria o pedido).
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("FeatherNotes {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let postit = std::env::args().any(|a| a == "--postit");
     // `--fundo`: o início com o sistema; só os post-its que estavam abertos aparecem.
     let fundo = std::env::args().any(|a| a == "--fundo");
@@ -1551,7 +1556,7 @@ impl Notas {
                 item("Ir para a linha…", "Ctrl+G", Some(Msg::IrPara)),
                 item("Propriedades do arquivo", "Alt+Enter", Some(Msg::Propriedades)),
                 item("Tela cheia", "F11", Some(Msg::TelaCheia)),
-                item("Procurar atualizações", "", Some(Msg::Atualizar)),
+                item("Procurar atualizações", concat!("versão ", env!("CARGO_PKG_VERSION")), Some(Msg::Atualizar)),
                 item("Sair", "Ctrl+Q", Some(Msg::Sair)),
                 separador(),
                 tipo,
