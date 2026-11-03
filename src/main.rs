@@ -772,42 +772,49 @@ impl Notas {
         let mut camadas = stack![corpo, canto];
         if p.menu_lembrete {
             let agora = hora::agora();
-            let opcao = |rotulo: &'static str, quando: Option<i64>| button(container(text(rotulo).size(12).color(tinta)).width(Length::FILL).align_x(Align::Center)).on_press(Msg::PostItLembrete(id, quando)).width(Length::FILL).padding([5u16, 6]).style(sobre);
+            // Tudo no tom do próprio papel: pílulas e campo com a tinta bem clara, sem branco nem preto.
+            let pilula = move |_: &Theme, s: Status| Style { background: Some(tinta.alpha(if matches!(s, Status::Hovered | Status::Pressed) { 0.16 } else { 0.07 }).into()), border: Border::rounded(14.0), ..Default::default() };
+            let opcao = |rotulo: &'static str, quando: i64| button(container(text(rotulo).size(12).color(tinta)).width(Length::FILL).align_x(Align::Center)).on_press(Msg::PostItLembrete(id, Some(quando))).width(Length::FILL).padding([6u16, 6]).style(pilula);
             let escolhido = hora::interpretar(&p.quando, agora);
-            let campo = container(text_input("15/11 14:30", &p.quando).on_input(move |t| Msg::PostItQuando(id, t)).on_submit(escolhido.map_or_else(|| Msg::PostItQuando(id, p.quando.clone()), |t| Msg::PostItLembrete(id, Some(t)))).size(12).padding(0.0).style(move |_, _| Style::default().text_color(tinta)))
-                .padding([0u16, 8])
-                .width(Length::FILL)
-                .height(26.0)
-                .align_y(Align::Center)
-                .style(caixa(Color::WHITE.alpha(0.55), Border::rounded(6.0).color(tinta.alpha(0.25), 1.0)));
-            let marcar = button(text("Lembrar").size(12).color(Color::WHITE)).on_press_maybe(escolhido.map(|t| Msg::PostItLembrete(id, Some(t)))).padding([5u16, 10]).style(move |t, s| {
-                let mut st = sobre(t, s);
-                st.background = Some(tinta.alpha(if escolhido.is_some() { 1.0 } else { 0.35 }).into());
-                st
+            let confirmar = escolhido.map_or_else(|| Msg::PostItQuando(id, p.quando.clone()), |t| Msg::PostItLembrete(id, Some(t)));
+            let ok = button(container(traco(ICONE_CERTO, 12.0, if escolhido.is_some() { fundo } else { tinta.alpha(0.3) })).center()).on_press_maybe(escolhido.map(|t| Msg::PostItLembrete(id, Some(t)))).width(24.0).height(24.0).padding(0.0).style(move |_, _| Style {
+                background: escolhido.map(|_| tinta.into()),
+                border: Border::rounded(12.0),
+                ..Default::default()
             });
-            // Como foi entendido, antes de confirmar; vazio, a dica do que dá para escrever.
-            let leitura = match (escolhido, p.quando.trim().is_empty()) {
-                (Some(t), _) => format!("→ {}", hora::descrever(t)),
-                (None, true) => "Ex.: 15/11 14:30, amanhã 8h, 18:00".into(),
-                (None, false) => "Não entendi (ou já passou)".into(),
-            };
+            let campo = container(
+                row![
+                    text_input("Outro dia: 15/11 14:30", &p.quando).on_input(move |t| Msg::PostItQuando(id, t)).on_submit(confirmar).size(12).padding(0.0).style(move |_, _| Style::default().text_color(tinta)),
+                    ok
+                ]
+                .spacing(4)
+                .align(Align::Center),
+            )
+            .padding(Padding { left: 12.0, right: 3.0, top: 0.0, bottom: 0.0 })
+            .width(Length::FILL)
+            .height(30.0)
+            .align_y(Align::Center)
+            .style(caixa(tinta.alpha(0.07), Border::rounded(15.0)));
+            // Só depois de escrever: como foi entendido (ou que não foi).
+            let leitura = (!p.quando.trim().is_empty()).then(|| text(escolhido.map_or("Não entendi, ou já passou".to_string(), |t| format!("→ {}", hora::descrever(t)))).size(11).color(tinta.alpha(0.65)));
+            let titulo = row![traco(ICONE_RELOGIO, 14.0, tinta), text(p.lembrete.map_or("Lembrar".to_string(), |t| format!("Lembra {}", hora::descrever(t)))).size(13).font(Font::SEMIBOLD).color(tinta)].spacing(6).align(Align::Center);
+            let tirar = p.lembrete.map(|_| button(text("Tirar o lembrete").size(12).color(Color::rgb8(0xb4, 0x23, 0x18))).on_press(Msg::PostItLembrete(id, None)).padding([4u16, 6]).style(sobre));
             let cartao = container(
                 column![
-                    text(p.lembrete.map_or("Lembrar:".to_string(), |t| format!("Lembra {}", hora::descrever(t)))).size(13).font(Font::SEMIBOLD).color(tinta),
-                    row![opcao("Em 15 min", Some(agora + 15 * 60)), opcao("Em 1 hora", Some(agora + 3600))].spacing(4),
-                    row![opcao("Em 3 horas", Some(agora + 3 * 3600)), opcao("Amanhã 9h", Some(hora::amanha_as(9)))].spacing(4),
-                    text("Outro dia e hora:").size(11).color(tinta.alpha(0.7)),
-                    row![campo, marcar].spacing(6).align(Align::Center),
-                    text(leitura).size(11).color(tinta.alpha(0.7)),
+                    titulo,
+                    row![opcao("Em 15 min", agora + 15 * 60), opcao("Em 1 hora", agora + 3600)].spacing(6),
+                    row![opcao("Em 3 horas", agora + 3 * 3600), opcao("Amanhã 9h", hora::amanha_as(9))].spacing(6),
+                    campo,
                 ]
-                .push_maybe(p.lembrete.map(|_| opcao("Tirar o lembrete", None)))
-                .spacing(5),
+                .push_maybe(leitura)
+                .push_maybe(tirar)
+                .spacing(8),
             )
-            .padding(10.0)
+            .padding(12.0)
             .width(Length::FILL)
-            .style(move |_| Style::default().background(fundo).border(Border::rounded(8.0).color(tinta.alpha(0.25), 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.18), offset: Point::new(0.0, 4.0), blur: 14.0 }));
-            let veu = container(Space::new(Length::FILL, Length::FILL)).style(caixa(tinta.alpha(0.12), Border::rounded(RAIO_JANELA)));
-            camadas = camadas.push(stack![mouse_area(veu).on_press(Msg::PostItMenuLembrete(id)), container(cartao).width(Length::FILL).height(Length::FILL).padding(10.0).center()]);
+            .style(move |_| Style::default().background(fundo).border(Border::rounded(10.0).color(tinta.alpha(0.12), 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.12), offset: Point::new(0.0, 4.0), blur: 16.0 }));
+            let veu = container(Space::new(Length::FILL, Length::FILL)).style(caixa(tinta.alpha(0.08), Border::rounded(RAIO_JANELA)));
+            camadas = camadas.push(stack![mouse_area(veu).on_press(Msg::PostItMenuLembrete(id)), container(cartao).width(Length::FILL).height(Length::FILL).padding(12.0).center()]);
         }
         if p.confirmar {
             let resposta = |rotulo, r: Option<bool>, cor: Color, fundo: Option<Color>| {
