@@ -129,8 +129,6 @@ pub struct PostItSalvo {
     pub posicao: Option<pelicano::Point>,
     /// Na lixeira da lista de post-its: some da tela mas dá para restaurar.
     pub excluido: bool,
-    /// Quando o post-it volta à tela sozinho (segundos UTC desde 1970).
-    pub lembrete: Option<i64>,
 }
 
 fn pasta_postits() -> PathBuf {
@@ -152,19 +150,17 @@ pub fn ler_postits() -> Vec<(PostItSalvo, String)> {
             let aberto = c.next() == Some("1");
             let fixo = c.next() == Some("1");
             let excluido = c.next() == Some("1");
-            // Depois: a posição (x, y) e o lembrete ("l<segundos>"), cada um só se houver.
-            let (lembretes, resto): (Vec<&str>, Vec<&str>) = c.partition(|f| f.starts_with('l'));
-            let lembrete = lembretes.first().and_then(|l| l[1..].parse().ok());
+            // Depois, a posição (x, y). O lembrete ("l<segundos>") da 0.1.15 saiu: é pulado.
+            let resto: Vec<&str> = c.filter(|f| !f.starts_with('l')).collect();
             let posicao = resto.first().zip(resto.get(1)).and_then(|(x, y)| Some(pelicano::Point::new(x.parse().ok()?, y.parse().ok()?)));
-            Some((PostItSalvo { id, cor, aberto, fixo, posicao, excluido, lembrete }, std::fs::read_to_string(texto_postit(id)).unwrap_or_default()))
+            Some((PostItSalvo { id, cor, aberto, fixo, posicao, excluido }, std::fs::read_to_string(texto_postit(id)).unwrap_or_default()))
         })
         .collect()
 }
 
 /// A lista; o texto de cada um é gravado à parte, só quando muda.
 pub fn gravar_postits(lista: &[PostItSalvo]) -> io::Result<()> {
-    // O lembrete vai no fim: as versões até a 0.1.14 leem a posição e ignoram o resto.
-    let s: String = lista.iter().map(|p| format!("{}\t{}\t{}\t{}\t{}{}{}\n", p.id, p.cor, u8::from(p.aberto), u8::from(p.fixo), u8::from(p.excluido), p.posicao.map_or(String::new(), |q| format!("\t{}\t{}", q.x, q.y)), p.lembrete.map_or(String::new(), |t| format!("\tl{t}")))).collect();
+    let s: String = lista.iter().map(|p| format!("{}\t{}\t{}\t{}\t{}{}\n", p.id, p.cor, u8::from(p.aberto), u8::from(p.fixo), u8::from(p.excluido), p.posicao.map_or(String::new(), |q| format!("\t{}\t{}", q.x, q.y)))).collect();
     std::fs::create_dir_all(pasta_postits())?;
     gravar(&pasta_postits().join("lista"), s.as_bytes())
 }
@@ -373,18 +369,18 @@ mod testes {
         assert_eq!(texto_gvariant("\"/a b/it's\" --postit"), "'\"/a b/it\\'s\" --postit'");
     }
 
-    /// A lista de post-its volta igual, com e sem posição e lembrete.
+    /// A lista volta igual; o lembrete gravado pela 0.1.15 ("l<segundos>") é pulado sem estragar a posição.
     #[test]
-    fn postits_voltam_com_lembrete() {
+    fn postits_voltam_e_pulam_o_lembrete_antigo() {
         let ponto = Some(pelicano::Point::new(10.0, 20.0));
-        let lista = [
-            PostItSalvo { id: 501, cor: 2, aberto: true, fixo: false, posicao: ponto, excluido: false, lembrete: Some(1_800_000_000) },
-            PostItSalvo { id: 502, cor: 0, aberto: false, fixo: true, posicao: None, excluido: true, lembrete: Some(5) },
-            PostItSalvo { id: 503, cor: 1, aberto: true, fixo: false, posicao: ponto, excluido: false, lembrete: None },
-        ];
+        let lista = [PostItSalvo { id: 501, cor: 2, aberto: true, fixo: false, posicao: ponto, excluido: false }, PostItSalvo { id: 502, cor: 0, aberto: false, fixo: true, posicao: None, excluido: true }];
         gravar_postits(&lista).unwrap();
-        let lidos: Vec<_> = ler_postits().into_iter().map(|(p, _)| (p.id, p.cor, p.aberto, p.fixo, p.posicao, p.excluido, p.lembrete)).filter(|p| p.0 > 500 && p.0 < 600).collect();
-        assert_eq!(lidos, lista.iter().map(|p| (p.id, p.cor, p.aberto, p.fixo, p.posicao, p.excluido, p.lembrete)).collect::<Vec<_>>());
+        let ver = |p: &PostItSalvo| (p.id, p.cor, p.aberto, p.fixo, p.posicao, p.excluido);
+        let lidos: Vec<_> = ler_postits().iter().map(|(p, _)| ver(p)).filter(|p| p.0 > 500 && p.0 < 600).collect();
+        assert_eq!(lidos, lista.iter().map(ver).collect::<Vec<_>>());
+        std::fs::write(pasta_postits().join("lista"), "503\t1\t1\t0\t0\t10\t20\tl1800000000\n504\t1\t1\t0\t0\tl5\n").unwrap();
+        let lidos: Vec<_> = ler_postits().iter().map(|(p, _)| (p.id, p.posicao)).collect();
+        assert_eq!(lidos, vec![(503, ponto), (504, None)]);
     }
 
     /// Ida e volta da sessão: o que foi gravado volta, e a cópia de uma aba da sessão não é apagada.

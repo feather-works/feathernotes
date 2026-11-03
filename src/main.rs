@@ -193,25 +193,12 @@ struct PostIt {
     excluido: bool,
     /// O × num post-it com texto: a pergunta está à mostra.
     confirmar: bool,
-    /// Quando ele volta à tela sozinho (segundos UTC).
-    lembrete: Option<i64>,
-    /// As opções do lembrete (o relógio da barra) à mostra.
-    menu_lembrete: bool,
-    /// A hora escrita no lembrete ("14:30"), para o dia do calendário.
-    quando: String,
-    /// O dia escolhido no calendário do lembrete.
-    data: Option<pelicano::Date>,
-    /// O calendário do lembrete aberto, no mês (ano, mês) à mostra.
-    calendario: Option<(i32, u8)>,
-    /// O tamanho da janela agora, e o de antes de crescer para o calendário do lembrete.
-    tamanho: Size,
-    antes: Option<Size>,
     /// A versão já gravada.
     gravado: u64,
 }
 
 impl PostIt {
-    /// A primeira linha com texto, sem os sinais de Markdown do começo (a lista e o lembrete).
+    /// A primeira linha com texto, sem os sinais de Markdown do começo (para a lista).
     fn resumo(&self) -> String {
         let t = self.conteudo.text();
         let primeira = t.lines().map(|l| l.trim_start_matches(['#', '-', '*', '>', ' ']).trim_start_matches("[ ] ").trim_start_matches("[x] ").replace("**", "")).find(|l| !l.trim().is_empty()).unwrap_or_default();
@@ -222,11 +209,6 @@ impl PostIt {
 /// (fundo, barra) de cada cor; o texto é sempre escuro, como no papel.
 const CORES_POSTIT: [(&str, &str); 5] = [("#fff3a6", "#f7e47c"), ("#d4f5c9", "#b9eaa8"), ("#ffd6e0", "#ffbccd"), ("#d3e9ff", "#b5d9ff"), ("#e6dcff", "#d3c4ff")];
 const TINTA_POSTIT: &str = "#3b3522";
-const TAMANHO_POSTIT: Size = Size::new(280.0, 280.0);
-/// A altura em que o calendário do lembrete cabe: a do post-it novo. Só um post-it que a pessoa
-/// encolheu cresce até ela, e volta depois.
-const ALTURA_CALENDARIO: f32 = 280.0;
-const MESES: [&str; 12] = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
 
 struct Busca {
     termo: String,
@@ -367,20 +349,6 @@ enum Msg {
     PostItMudou,
     PostItCor(u64),
     PostItFixar(u64),
-    /// O relógio da barra: mostra ou esconde as opções do lembrete.
-    PostItMenuLembrete(u64),
-    /// Marca (segundos UTC) ou tira o lembrete.
-    PostItLembrete(u64, Option<i64>),
-    /// A hora escrita no lembrete mudou.
-    PostItQuando(u64, String),
-    /// O dia escolhido no calendário do lembrete.
-    PostItData(u64, pelicano::Date),
-    /// Abre ou fecha o calendário do lembrete.
-    PostItCalendario(u64),
-    /// O calendário anda `n` meses.
-    PostItMes(u64, i32),
-    /// A janela do post-it mudou de tamanho.
-    PostItTamanho(u64, Size),
     PostItArrastar(u64),
     PostItPuxar(u64, ResizeDirection),
     /// O × do post-it: com texto, pergunta antes.
@@ -461,7 +429,7 @@ impl Notas {
         let escuro = escuro(prefs.tema);
         let atalho_windows = prefs.atalho;
         let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: if cfg!(windows) { atalho_windows } else { cfg!(target_os = "linux") && arquivo::tem_atalho_postit() }, fechadas: Vec::new() };
-        n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido, lembrete }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0, lembrete, menu_lembrete: false, quando: String::new(), data: None, calendario: None, tamanho: TAMANHO_POSTIT, antes: None }).collect();
+        n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0 }).collect();
         n.carregar(n.ativa);
         n
     }
@@ -609,7 +577,7 @@ impl Notas {
                 }
             }
         }
-        let lista: Vec<PostItSalvo> = self.postits.iter().map(|p| PostItSalvo { id: p.id, cor: p.cor, aberto: p.aberto, fixo: p.fixo, posicao: p.posicao, excluido: p.excluido, lembrete: p.lembrete }).collect();
+        let lista: Vec<PostItSalvo> = self.postits.iter().map(|p| PostItSalvo { id: p.id, cor: p.cor, aberto: p.aberto, fixo: p.fixo, posicao: p.posicao, excluido: p.excluido }).collect();
         if let Err(e) = arquivo::gravar_postits(&lista) {
             self.aviso = Some(format!("Não guardou os post-its: {e}"));
         }
@@ -620,7 +588,7 @@ impl Notas {
         p.aberto = true;
         p.confirmar = false;
         // Fechar pelo sistema (Alt+F4) também passa pela pergunta.
-        let s = Settings { title: "Post-it".into(), size: TAMANHO_POSTIT, min_size: Some(Size::new(180.0, 140.0)), decorations: false, transparent: true, close_on_request: false, app_id: Some("feathernotes".into()), position: p.posicao, skip_taskbar: true, ..Default::default() };
+        let s = Settings { title: "Post-it".into(), size: Size::new(280.0, 280.0), min_size: Some(Size::new(180.0, 140.0)), decorations: false, transparent: true, close_on_request: false, app_id: Some("feathernotes".into()), position: p.posicao, skip_taskbar: true, ..Default::default() };
         let fixo = p.fixo.then(|| Task::window_of(WindowId(p.id), WindowCmd::Level(WindowLevel::AlwaysOnBottom)));
         Task::batch([Task::open_window(WindowId(p.id), s)].into_iter().chain(fixo).chain(recortar(WindowId(p.id))))
     }
@@ -634,45 +602,8 @@ impl Notas {
         } else {
             self.postits[i].aberto = false;
             self.postits[i].excluido = excluir;
-            // Na lixeira, não lembra.
-            if excluir {
-                self.postits[i].lembrete = None;
-            }
         }
         self.guardar_postits();
-    }
-
-    /// Os post-its cujo lembrete chegou voltam à tela (abrem, ou vêm para a frente) e, no Linux,
-    /// avisam também por notificação do sistema (no Wayland a janela aberta só pisca na barra).
-    fn lembretes(&mut self) -> Task<Msg> {
-        let agora = hora::agora();
-        let hora: Vec<usize> = (0..self.postits.len()).filter(|&i| self.postits[i].lembrete.is_some_and(|t| t <= agora) && !self.postits[i].excluido).collect();
-        if hora.is_empty() {
-            return Task::none();
-        }
-        let mut tarefas = Vec::new();
-        for i in hora {
-            let p = &mut self.postits[i];
-            p.lembrete = None;
-            // Preso no fundo da tela ele não apareceria: solta.
-            if std::mem::take(&mut p.fixo) {
-                tarefas.push(Task::window_of(WindowId(p.id), WindowCmd::Level(WindowLevel::Normal)));
-            }
-            let id = p.id;
-            #[cfg(all(target_os = "linux", not(test)))]
-            let _ = std::process::Command::new("notify-send").args(["-a", "FeatherNotes", "-i", "feathernotes", "Lembrete", &p.resumo()]).spawn();
-            tarefas.push(if p.aberto { Task::window_of(WindowId(id), WindowCmd::Focus) } else { self.abrir_postit(i) });
-        }
-        self.guardar_postits();
-        Task::batch(tarefas)
-    }
-
-    /// Fecha o cartão do lembrete e devolve o post-it ao tamanho de antes de crescer.
-    fn fechar_lembrete(&mut self, id: u64) -> Task<Msg> {
-        let Some(p) = self.postits.iter_mut().find(|p| p.id == id) else { return Task::none() };
-        (p.menu_lembrete, p.data, p.calendario) = (false, None, None);
-        p.quando.clear();
-        voltar_tamanho(p)
     }
 
     /// Um post-it novo, aberto, com `texto` (vazio, ou o selecionado na aba).
@@ -681,7 +612,7 @@ impl Notas {
         let id = self.postits.iter().map(|p| p.id + 1).max().unwrap_or(1);
         // A cor seguinte à do último: post-its novos não ficam todos iguais.
         let cor = self.postits.last().map_or(0, |p| (p.cor + 1) % CORES_POSTIT.len());
-        self.postits.push(PostIt { id, conteudo: Content::with_text(texto), cor, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0, lembrete: None, menu_lembrete: false, quando: String::new(), data: None, calendario: None, tamanho: TAMANHO_POSTIT, antes: None });
+        self.postits.push(PostIt { id, conteudo: Content::with_text(texto), cor, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0 });
         let t = self.abrir_postit(self.postits.len() - 1);
         // Com texto, ele já vai para o disco (a versão 0 conta como gravada).
         if !texto.is_empty() {
@@ -756,17 +687,6 @@ impl Notas {
             cor,
             mouse_area(Space::new(Length::FILL, 26.0)).on_press(Msg::PostItArrastar(id)),
             tooltip(
-                button(container(traco(ICONE_RELOGIO, 14.0, if p.lembrete.is_some() { tinta } else { tinta.alpha(0.45) })).center()).on_press(Msg::PostItMenuLembrete(id)).width(28.0).height(26.0).padding(0.0).style(move |t, s| {
-                    let mut st = sobre(t, s);
-                    if p.lembrete.is_some() {
-                        st.background = Some(tinta.alpha(0.14).into());
-                    }
-                    st
-                }),
-                p.lembrete.map_or("Lembrar depois".to_string(), |t| format!("Lembra em {}", hora::local(t).texto())),
-                TooltipPosition::Bottom
-            ),
-            tooltip(
                 button(container(traco(ICONE_ALFINETE, 14.0, if p.fixo { tinta } else { tinta.alpha(0.45) })).center()).on_press(Msg::PostItFixar(id)).width(28.0).height(26.0).padding(0.0).style(move |t, s| {
                     let mut st = sobre(t, s);
                     if p.fixo {
@@ -798,67 +718,6 @@ impl Notas {
         let alca = |d: ResizeDirection| mouse_area(Space::new(14.0, 14.0)).on_press(Msg::PostItPuxar(id, d)).cursor_icon(CursorIcon::SeResize);
         let canto = container(alca(ResizeDirection::SouthEast)).width(Length::FILL).height(Length::FILL).align_x(Align::End).align_y(Align::End);
         let mut camadas = stack![corpo, canto];
-        if p.menu_lembrete {
-            let agora = hora::agora();
-            // Tudo no tom do próprio papel: pílulas e campo com a tinta bem clara, sem branco nem preto.
-            let pilula = move |_: &Theme, s: Status| Style { background: Some(tinta.alpha(if matches!(s, Status::Hovered | Status::Pressed) { 0.16 } else { 0.07 }).into()), border: Border::rounded(14.0), ..Default::default() };
-            let opcao = |rotulo: &'static str, quando: i64| button(container(text(rotulo).size(12).color(tinta)).width(Length::FILL).align_x(Align::Center)).on_press(Msg::PostItLembrete(id, Some(quando))).width(Length::FILL).padding([6u16, 6]).style(pilula);
-            // O dia do calendário mais a hora escrita; só a hora vale hoje (ou amanhã se já passou).
-            let texto = p.data.map_or(p.quando.clone(), |d| format!("{}/{}/{} {}", d.day, d.month, d.year, p.quando));
-            let escolhido = hora::interpretar(&texto, agora);
-            let confirmar = escolhido.map_or_else(|| Msg::PostItQuando(id, p.quando.clone()), |t| Msg::PostItLembrete(id, Some(t)));
-            let ok = button(container(traco(ICONE_CERTO, 12.0, if escolhido.is_some() { fundo } else { tinta.alpha(0.3) })).center()).on_press_maybe(escolhido.map(|t| Msg::PostItLembrete(id, Some(t)))).width(24.0).height(24.0).padding(0.0).style(move |_, _| Style {
-                background: escolhido.map(|_| tinta.into()),
-                border: Border::rounded(12.0),
-                ..Default::default()
-            });
-            let dia = button(
-                row![text(p.data.map_or("Outro dia".to_string(), |d| d.to_string())).size(12).color(if p.data.is_some() { tinta } else { tinta.alpha(0.55) }).width(Length::FILL), traco(ICONE_CALENDARIO, 14.0, tinta.alpha(0.7))].align(Align::Center),
-            )
-            .on_press(Msg::PostItCalendario(id))
-            .width(Length::FILL)
-            .height(34.0)
-            .padding([0u16, 10])
-            .style(move |_, s| Style { background: Some(tinta.alpha(if p.calendario.is_some() || matches!(s, Status::Hovered | Status::Pressed) { 0.14 } else { 0.07 }).into()), border: Border::rounded(6.0), ..Default::default() });
-            let horario = container(text_input("09:00", &p.quando).on_input(move |t| Msg::PostItQuando(id, t)).on_submit(confirmar).size(12).padding(0.0).style(move |_, _| Style::default().text_color(tinta)))
-                .padding([0u16, 10])
-                .width(64.0)
-                .height(34.0)
-                .align_y(Align::Center)
-                .style(caixa(tinta.alpha(0.07), Border::rounded(6.0)));
-            let campo = row![dia, horario, ok].spacing(6).align(Align::Center);
-            // Só depois de escolher: como foi entendido (ou que não foi).
-            let leitura = (p.data.is_some() || !p.quando.trim().is_empty()).then(|| text(escolhido.map_or("Não entendi, ou já passou".to_string(), |t| format!("→ {}", hora::descrever(t)))).size(11).color(tinta.alpha(0.65)));
-            let titulo = row![traco(ICONE_RELOGIO, 14.0, tinta), text(p.lembrete.map_or("Lembrar".to_string(), |t| format!("Lembra {}", hora::descrever(t)))).size(13).font(Font::SEMIBOLD).color(tinta)].spacing(6).align(Align::Center);
-            let tirar = p.lembrete.map(|_| button(text("Tirar o lembrete").size(12).color(Color::rgb8(0xb4, 0x23, 0x18))).on_press(Msg::PostItLembrete(id, None)).padding([4u16, 6]).style(sobre));
-            // Com o calendário aberto ele toma o lugar das pílulas.
-            let meio: Element<'_, Msg> = match p.calendario {
-                Some((ano, mes)) => calendario(id, ano, mes, p.data, tinta, fundo),
-                None => column![
-                    row![opcao("Em 15 min", agora + 15 * 60), opcao("Em 1 hora", agora + 3600)].spacing(6),
-                    row![opcao("Em 3 horas", agora + 3 * 3600), opcao("Amanhã 9h", hora::amanha_as(9))].spacing(6),
-                ]
-                .spacing(8)
-                .into(),
-            };
-            let aberto = p.calendario.is_some();
-            let cartao = container(
-                column![]
-                    .push_maybe((!aberto).then_some(titulo))
-                    .push(meio)
-                    .push(campo)
-                .push_maybe(leitura)
-                .push_maybe(tirar)
-                .spacing(8),
-            )
-            .padding(12.0)
-            .width(Length::FILL)
-            .style(move |_| Style::default().background(fundo).border(Border::rounded(10.0).color(tinta.alpha(0.12), 1.0)).shadow(Shadow { color: Color::BLACK.alpha(0.12), offset: Point::new(0.0, 4.0), blur: 16.0 }));
-            let veu = container(Space::new(Length::FILL, Length::FILL)).style(caixa(tinta.alpha(0.08), Border::rounded(RAIO_JANELA)));
-            // Com o calendário, o cartão sobe por cima da barra: tudo cabe no post-it de 280 × 280.
-            let topo = if aberto { 8.0 } else { 36.0 };
-            camadas = camadas.push(stack![mouse_area(veu).on_press(Msg::PostItMenuLembrete(id)), container(cartao).width(Length::FILL).height(Length::FILL).padding(Padding { top: topo, right: 10.0, bottom: 8.0, left: 10.0 }).align_x(Align::Center)]);
-        }
         if p.confirmar {
             let resposta = |rotulo, r: Option<bool>, cor: Color, fundo: Option<Color>| {
                 button(text(rotulo).size(12).color(cor)).on_press(Msg::PostItResposta(id, r)).padding([5u16, 10]).style(move |t, s| {
@@ -1048,51 +907,6 @@ fn lembrar<T: Clone>(cache: &Lembrado<T>, chave: (u64, u64), calcular: impl FnOn
     }
 }
 
-/// O calendário do lembrete, dentro do cartão: o mês com setas, os dias a partir de hoje.
-fn calendario<'a>(id: u64, ano: i32, mes: u8, escolhido: Option<pelicano::Date>, tinta: Color, fundo: Color) -> Element<'a, Msg> {
-    let hoje = hora::local(hora::agora());
-    let hoje = pelicano::Date::new(hoje.ano as i32, hoje.mes as u8, hoje.dia as u8).expect("data do sistema");
-    let seta = |icone: &'static str, n: i32| button(container(traco(icone, 14.0, tinta)).center()).on_press(Msg::PostItMes(id, n)).width(26.0).height(24.0).padding(0.0).style(move |_, s| Style { background: matches!(s, Status::Hovered | Status::Pressed).then(|| tinta.alpha(0.1).into()), border: Border::rounded(6.0), ..Default::default() });
-    let topo = row![seta(ICONE_ANTERIOR, -1), container(text(format!("{} {ano}", MESES[usize::from(mes) - 1])).size(12).font(Font::SEMIBOLD).color(tinta)).width(Length::FILL).align_x(Align::Center), seta(ICONE_PROXIMO, 1)].align(Align::Center);
-    let letra = |l: &'static str| container(text(l).size(10).color(tinta.alpha(0.55))).width(Length::FILL).align_x(Align::Center);
-    let semana = row![letra("D"), letra("S"), letra("T"), letra("Q"), letra("Q"), letra("S"), letra("S")];
-    let primeiro = pelicano::Date::new(ano, mes, 1).expect("dia 1").weekday();
-    let total = pelicano::days_in_month(ano, mes);
-    let mut grade = column![topo, semana].spacing(1);
-    // Só as semanas que o mês usa (4 a 6).
-    for semana in 0..(primeiro + total).div_ceil(7) {
-        let mut linha = row![].spacing(1);
-        for k in 0..7u8 {
-            let n = (semana * 7 + k + 1).checked_sub(primeiro + 1).map(|d| d + 1).filter(|&d| d <= total);
-            linha = linha.push(match n.and_then(|d| pelicano::Date::new(ano, mes, d)) {
-                None => Element::from(Space::new(Length::FILL, 22.0)),
-                Some(d) => {
-                    let (marcado, passado) = (escolhido == Some(d), d < hoje);
-                    let cor = if marcado { fundo } else if passado { tinta.alpha(0.3) } else { tinta };
-                    button(container(text(d.day.to_string()).size(11).color(cor)).width(Length::FILL).align_x(Align::Center))
-                        .on_press_maybe((!passado).then_some(Msg::PostItData(id, d)))
-                        .width(Length::FILL)
-                        .height(22.0)
-                        .padding([4u16, 0])
-                        .style(move |_, s| Style {
-                            background: if marcado { Some(tinta.into()) } else { matches!(s, Status::Hovered | Status::Pressed).then(|| tinta.alpha(0.1).into()) },
-                            border: if d == hoje && !marcado { Border::rounded(12.0).color(tinta.alpha(0.5), 1.0) } else { Border::rounded(12.0) },
-                            ..Default::default()
-                        })
-                        .into()
-                }
-            });
-        }
-        grade = grade.push(linha);
-    }
-    grade.into()
-}
-
-/// O post-it volta ao tamanho de antes de crescer para o calendário (se cresceu).
-fn voltar_tamanho(p: &mut PostIt) -> Task<Msg> {
-    p.antes.take().map_or_else(Task::none, |t| Task::window_of(WindowId(p.id), WindowCmd::Resize(t)))
-}
-
 /// Abre um link ou uma pasta com o programa padrão do sistema.
 fn abrir_no_sistema(alvo: impl AsRef<std::ffi::OsStr>) -> std::io::Result<std::process::Child> {
     let programa = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
@@ -1184,10 +998,6 @@ const ICONE_LINK: &str = r#"<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1
 const ICONE_TABELA: &str = r#"<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M4 14.5h16M10 5v14"/>"#;
 const ICONE_TAREFA: &str = r#"<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>"#;
 const ICONE_CERTO: &str = r#"<path d="M5 12.5l4.5 4.5L19 7.5" stroke-width="3"/>"#;
-const ICONE_RELOGIO: &str = r#"<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M5 4L2.5 6.5M19 4l2.5 2.5"/>"#;
-const ICONE_ANTERIOR: &str = r#"<path d="M15 6l-6 6 6 6"/>"#;
-const ICONE_PROXIMO: &str = r#"<path d="M9 6l6 6-6 6"/>"#;
-const ICONE_CALENDARIO: &str = r#"<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/>"#;
 const ICONE_ALFINETE: &str = r#"<path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 15v5"/>"#;
 const ICONE_PASTA: &str = r#"<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"#;
 
@@ -1987,7 +1797,6 @@ impl App for Notas {
                 self.cpu_antes = agora;
                 self.recursos = format!("RAM {} MB{cpu}", consumo::rss_kb().unwrap_or(0).div_ceil(1024));
                 self.conferir_disco();
-                return self.lembretes();
             }
             Msg::Fonte_(f) => self.mudar_prefs(|p| p.fonte = f),
             Msg::Markdown(m) => {
@@ -2335,58 +2144,6 @@ impl App for Notas {
                 self.guardar_postits();
                 return Task::window_of(WindowId(id), WindowCmd::Level(nivel));
             }
-            Msg::PostItMenuLembrete(id) => {
-                let Some(p) = self.postits.iter_mut().find(|p| p.id == id) else { return Task::none() };
-                if p.menu_lembrete {
-                    return self.fechar_lembrete(id);
-                }
-                p.menu_lembrete = true;
-            }
-            Msg::PostItCalendario(id) => {
-                let Some(p) = self.postits.iter_mut().find(|p| p.id == id) else { return Task::none() };
-                if p.calendario.take().is_some() {
-                    return voltar_tamanho(p);
-                }
-                let hoje = hora::local(hora::agora());
-                p.calendario = Some(p.data.map_or((hoje.ano as i32, hoje.mes as u8), |d| (d.year, d.month)));
-                // Só agora, e só a altura que falta: o post-it volta ao tamanho dele quando o calendário fecha.
-                if p.tamanho.height < ALTURA_CALENDARIO {
-                    p.antes = Some(p.tamanho);
-                    return Task::window_of(WindowId(id), WindowCmd::Resize(Size::new(p.tamanho.width, ALTURA_CALENDARIO)));
-                }
-            }
-            Msg::PostItMes(id, n) => {
-                if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
-                    if let Some((ano, mes)) = p.calendario {
-                        let k = ano * 12 + i32::from(mes) - 1 + n;
-                        p.calendario = Some((k.div_euclid(12), (k.rem_euclid(12) + 1) as u8));
-                    }
-                }
-            }
-            Msg::PostItLembrete(id, quando) => {
-                if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
-                    p.lembrete = quando;
-                }
-                self.guardar_postits();
-                return self.fechar_lembrete(id);
-            }
-            Msg::PostItData(id, d) => {
-                let Some(p) = self.postits.iter_mut().find(|p| p.id == id) else { return Task::none() };
-                (p.data, p.calendario) = (Some(d), None);
-                return voltar_tamanho(p);
-            }
-            Msg::PostItTamanho(id, t) => {
-                if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
-                    p.tamanho = t;
-                }
-                #[cfg(windows)]
-                return self.update(Msg::Recortar(WindowId(id)));
-            }
-            Msg::PostItQuando(id, t) => {
-                if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
-                    p.quando = t;
-                }
-            }
             Msg::PostItArrastar(id) => return Task::window_of(WindowId(id), WindowCmd::Drag),
             Msg::PostItPuxar(id, d) => return Task::window_of(WindowId(id), WindowCmd::DragResize(d)),
             Msg::PostItFechar(id) => {
@@ -2451,7 +2208,7 @@ impl App for Notas {
         Task::none()
     }
 
-    /// O post-it é papel colorido nos dois temas: o calendário do lembrete sai nas cores dele.
+    /// O post-it é papel colorido nos dois temas: o que ele desenha com o tema (seleção, campos) segue as cores dele.
     fn theme_window(&self, id: WindowId) -> Theme {
         let Some(p) = self.postits.iter().find(|p| WindowId(p.id) == id && id != WindowId::MAIN) else { return self.theme() };
         let (fundo, barra) = CORES_POSTIT[p.cor];
@@ -2479,7 +2236,8 @@ impl App for Notas {
         }
         match ev {
             Event::CloseRequested => Some(Msg::PostItFechar(id.0)),
-            Event::Resized(t) => Some(Msg::PostItTamanho(id.0, *t)),
+            #[cfg(windows)]
+            Event::Resized(_) => Some(Msg::Recortar(id)),
             // O (0, 0) chega logo que a janela nasce, antes de o gerenciador pôr ela no lugar.
             Event::Moved(p) if *p != Point::ORIGIN => Some(Msg::PostItMoveu(id.0, *p)),
             Event::Key { key: Key::Character(k), modifiers, pressed: true, .. } if modifiers.control_key() && k.eq_ignore_ascii_case("n") => Some(Msg::NovoPostIt),
@@ -2755,48 +2513,6 @@ mod testes {
         let _ = std::fs::remove_dir_all(&pasta);
     }
 
-    /// O lembrete que chegou abre o post-it fechado, solta o alfinete e some; o da lixeira não toca.
-    #[test]
-    fn lembrete_reabre_o_postit() {
-        let mut n = Notas::novo();
-        let _ = n.update(Msg::NovoPostIt);
-        let id = n.postits.last().unwrap().id;
-        n.postits.last_mut().unwrap().conteudo = Content::with_text("Pagar boleto");
-        let _ = n.update(Msg::PostItResposta(id, Some(false)));
-        let p = n.postits.iter_mut().find(|p| p.id == id).unwrap();
-        assert!(!p.aberto);
-        p.fixo = true;
-        let _ = n.update(Msg::PostItLembrete(id, Some(hora::agora() + 3600)));
-        let _ = n.update(Msg::Medir);
-        assert!(!n.postits.iter().find(|p| p.id == id).unwrap().aberto, "ainda não chegou a hora");
-        let _ = n.update(Msg::PostItLembrete(id, Some(hora::agora() - 1)));
-        let _ = n.update(Msg::Medir);
-        let p = n.postits.iter().find(|p| p.id == id).unwrap();
-        assert!(p.aberto && !p.fixo && p.lembrete.is_none());
-        // Só o calendário faz o post-it crescer; escolher o dia devolve o tamanho de antes.
-        let _ = n.update(Msg::PostItMenuLembrete(id));
-        assert_eq!(n.postits.iter().find(|p| p.id == id).unwrap().antes, None, "abrir o cartão não cresce");
-        let _ = n.update(Msg::PostItCalendario(id));
-        assert_eq!(n.postits.iter().find(|p| p.id == id).unwrap().antes, None, "no tamanho padrão o calendário cabe");
-        let _ = n.update(Msg::PostItCalendario(id));
-        // Encolhido pela pessoa: cresce só até o padrão, e volta.
-        let pequeno = Size::new(200.0, 160.0);
-        let _ = n.update(Msg::PostItTamanho(id, pequeno));
-        let _ = n.update(Msg::PostItCalendario(id));
-        assert_eq!(n.postits.iter().find(|p| p.id == id).unwrap().antes, Some(pequeno));
-        let _ = n.update(Msg::PostItMes(id, -11));
-        let _ = n.update(Msg::PostItData(id, pelicano::Date::new(2099, 1, 2).unwrap()));
-        let p = n.postits.iter().find(|p| p.id == id).unwrap();
-        assert!(p.calendario.is_none() && p.antes.is_none() && p.data.is_some());
-        let _ = n.update(Msg::PostItLembrete(id, Some(hora::agora() + 60)));
-        let p = n.postits.iter().find(|p| p.id == id).unwrap();
-        assert!(!p.menu_lembrete && p.antes.is_none() && p.data.is_none());
-        // Na lixeira o lembrete vai embora.
-        let _ = n.update(Msg::PostItLembrete(id, Some(hora::agora() - 1)));
-        let _ = n.update(Msg::PostItResposta(id, Some(true)));
-        assert!(n.postits.iter().find(|p| p.id == id).unwrap().lembrete.is_none());
-    }
-
     /// Link que não é da web nem e-mail não abre: só avisa.
     #[test]
     fn link_de_arquivo_nao_abre() {
@@ -2859,13 +2575,13 @@ mod testes {
                 (n.prefs.configurado, n.confirmar) = (antes, conf);
             }
             // O post-it desenha na janela dele.
-            n.postits.push(PostIt { id: 77, conteudo: Content::with_text("Comprar pão\n- [ ] leite\n- [x] **café**"), cor: 0, aberto: true, fixo: true, posicao: None, excluido: false, confirmar: true, gravado: 0, lembrete: Some(1_800_000_000), menu_lembrete: false, quando: String::new(), data: None, calendario: None, tamanho: TAMANHO_POSTIT, antes: None });
+            n.postits.push(PostIt { id: 77, conteudo: Content::with_text("Comprar pão\n- [ ] leite\n- [x] **café**"), cor: 0, aberto: true, fixo: true, posicao: None, excluido: false, confirmar: true, gravado: 0 });
             let nota = capture(&n.view_window(WindowId(77)), Size::new(280.0, 280.0), 1.0, &n.theme(), &mut Renderer::new(), None);
             assert!(nota.len() > 2_000);
             if let Some(d) = std::env::var_os("FEATHERNOTES_CAPTURAR") {
                 std::fs::write(PathBuf::from(&d).join(format!("postit-{escuro}.png")), &nota).unwrap();
                 // A lista, com um na lixeira.
-                n.postits.push(PostIt { id: 78, conteudo: Content::with_text("## Reunião às 15h"), cor: 2, aberto: false, fixo: false, posicao: None, excluido: true, confirmar: false, gravado: 0, lembrete: None, menu_lembrete: false, quando: String::new(), data: None, calendario: None, tamanho: TAMANHO_POSTIT, antes: None });
+                n.postits.push(PostIt { id: 78, conteudo: Content::with_text("## Reunião às 15h"), cor: 2, aberto: false, fixo: false, posicao: None, excluido: true, confirmar: false, gravado: 0 });
                 let (menu, conf, prop) = (std::mem::take(&mut n.menu), n.confirmar.take(), std::mem::take(&mut n.propriedades));
                 n.painel_postits = true;
                 std::fs::write(PathBuf::from(&d).join(format!("lista-{escuro}.png")), capture(&n.view(), Size::new(980.0, 680.0), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
