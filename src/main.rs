@@ -2622,4 +2622,57 @@ mod testes {
             }
         }
     }
+
+    /// Prints da loja: `FEATHERNOTES_LOJA=<pasta> cargo test --release captura_loja`. Sem a variável, não faz nada.
+    #[test]
+    fn captura_loja() {
+        let Some(d) = std::env::var_os("FEATHERNOTES_LOJA") else { return };
+        let d = PathBuf::from(d);
+        let tam = Size::new(1280.0, 800.0);
+        let viagem = "# Viagem para a serra\n\nSaída **sexta às 7h**, volta no domingo.\n\n## Levar\n- [x] casaco e cachecol\n- [x] carregador do celular\n- [ ] remédio de enjoo\n- [ ] *garrafa de água*\n\n## Roteiro\n1. Café colonial na estrada\n2. Trilha da cachoeira (3 km)\n3. Fondue no sábado à noite\n\n> Reservar o chalé até quarta: `cód. 4821`\n\n[Mapa da trilha](https://example.com/trilha)\n";
+        let lista = "Mercado\n\npão francês\nleite\ncafé em pó\nqueijo minas\nbanana\ncafé em grão para o escritório\nsabão\n";
+        let dados = "{\n  \"nome\": \"Ana\",\n  \"cidade\": \"Curitiba\",\n  \"tarefas\": [\n    \"comprar café\",\n    \"ligar para o banco\"\n  ],\n  \"lembrete\": true\n}\n";
+        let preparar = |escuro: bool| {
+            let mut n = Notas::novo();
+            n.escuro = escuro;
+            n.prefs.configurado = true;
+            n.prefs.invisiveis = false;
+            n.postits.clear();
+            n.abas = vec![
+                Aba { conteudo: Some(Content::with_text(viagem)), ..Aba::nova(1, Some("/home/ana/Notas/Viagem.md".into())) },
+                Aba { conteudo: Some(Content::with_text(lista)), ..Aba::nova(2, Some("/home/ana/Notas/mercado.txt".into())) },
+                Aba { conteudo: Some(Content::with_text(dados)), ..Aba::nova(3, Some("/home/ana/Notas/perfil.json".into())) },
+            ];
+            n.ativa = 0;
+            n
+        };
+        let foto = |n: &Notas, nome: &str| std::fs::write(d.join(nome), capture(&n.view(), tam, 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
+
+        foto(&preparar(false), "1-markdown.png");
+        foto(&preparar(true), "2-escuro.png");
+
+        let mut n = preparar(false);
+        n.ativa = 1;
+        n.busca = Some(Busca { termo: "café".into(), troca: "chá".into(), maiusculas: false });
+        foto(&n, "3-localizar.png");
+
+        let mut n = preparar(false);
+        let notas = [("## Reunião às 15h\n- [x] pauta\n- [ ] **ata**", 0), ("Ligar para o dentista\nterça de manhã", 1), ("- [ ] pagar a luz\n- [x] renovar o seguro", 3)];
+        for (i, (texto, cor)) in notas.iter().enumerate() {
+            n.postits.push(PostIt { id: 70 + i as u64, conteudo: Content::with_text(texto), cor: *cor, aberto: true, fixo: false, posicao: None, excluido: false, confirmar: false, gravado: 0 });
+            std::fs::write(d.join(format!("postit-{i}.png")), capture(&n.view_window(WindowId(70 + i as u64)), Size::new(280.0, 280.0), 1.0, &n.theme(), &mut Renderer::new(), None)).unwrap();
+        }
+        n.postits.push(PostIt { id: 79, conteudo: Content::with_text("Ideias para o blog"), cor: 2, aberto: false, fixo: false, posicao: None, excluido: true, confirmar: false, gravado: 0 });
+        n.painel_postits = true;
+        foto(&n, "4-postits.png");
+
+        let mut n = preparar(false);
+        n.ativa = 1;
+        n.menu_cod = Some(false);
+        foto(&n, "5-codificacao.png");
+
+        let mut n = preparar(true);
+        n.ativa = 2;
+        foto(&n, "6-json.png");
+    }
 }
