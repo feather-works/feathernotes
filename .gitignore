@@ -1,3 +1,6 @@
 target/
 pacote/saida/
 *.snap
+
+# Anotação local de pendências
+/PENDENTE.md
