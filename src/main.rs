@@ -14,6 +14,7 @@ mod consumo;
 mod hora;
 mod instancia;
 mod json;
+mod transformar;
 
 use arquivo::{AbaSalva, Fonte, PostItSalvo, Preferencias, Tema};
 use codificacao::Cod;
@@ -239,6 +240,8 @@ struct Notas {
     altura: f32,
     /// A lista de codificações aberta; `true` = "Reabrir com" em vez de "Converter para".
     menu_cod: Option<bool>,
+    /// O menu "Transformar a seleção" aberto (o clique na contagem da seleção, no rodapé).
+    menu_selecao: bool,
     outras_cod: bool,
     /// "RAM 40 MB · CPU 0,1%" no rodapé, medido a cada 2 s.
     recursos: String,
@@ -281,6 +284,9 @@ enum Msg {
     Tamanho(Size),
     MenuCod(Option<bool>),
     OutrasCod,
+    MenuSelecao,
+    /// Troca a seleção por ela transformada: (como, decodificar).
+    Transformar(transformar::Jeito, bool),
     Reabrir(Cod),
     Detectar,
     ConsertarAcentos,
@@ -433,7 +439,7 @@ impl Notas {
         }
         let escuro = escuro(prefs.tema);
         let atalho_windows = prefs.atalho;
-        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: if cfg!(windows) { atalho_windows } else { cfg!(target_os = "linux") && arquivo::tem_atalho_postit() }, fechadas: Vec::new() };
+        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, menu_selecao: false, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: if cfg!(windows) { atalho_windows } else { cfg!(target_os = "linux") && arquivo::tem_atalho_postit() }, fechadas: Vec::new() };
         n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0 }).collect();
         n.carregar(n.ativa);
         n
@@ -1478,7 +1484,13 @@ impl Notas {
         // A palavra selecionada é suspeita: quais letras estão disfarçadas.
         let selecao = conteudo.selection();
         let sob_cursor = sob_cursor.or_else(|| suspeitas.into_iter().find(|s| selecao.as_deref() == Some(&s.palavra)).map(|s| item(s.resumo)));
+        // Com texto selecionado: quanto ele tem, e o clique abre o "Transformar a seleção".
+        let contagem = selecao.as_deref().filter(|s| !s.is_empty()).map(|s| {
+            let (p, c) = (s.split_whitespace().count(), s.chars().filter(|&c| c != '\n' && c != '\r').count());
+            clicavel(format!("{p} {}, {c} {} selecionados", if p == 1 { "palavra" } else { "palavras" }, if c == 1 { "caractere" } else { "caracteres" }), Msg::MenuSelecao)
+        });
         let linha = row![clicavel(format!("Ln {ln}, Col {col}"), Msg::IrPara)]
+            .push_maybe(contagem)
             .push_maybe((!self.compacta()).then(|| item(self.recursos.clone())))
             .push_maybe(sob_cursor)
             .push_maybe(aviso_ocultos)
@@ -1644,6 +1656,25 @@ impl Notas {
         stack![mouse_area(Space::new(Length::FILL, Length::FILL)).on_press(Msg::MenuCod(None)), container(cartao).width(Length::FILL).align_x(Align::End).padding(Padding { top: ALTURA_BARRA + 8.0, right: 16.0, ..Padding::ZERO })].into()
     }
 
+    /// "Transformar a seleção": maiúsculas e minúsculas, e codificar ou decodificar, acima do rodapé.
+    fn menu_selecao(&self, c: Cores) -> Element<'_, Msg> {
+        use transformar::Jeito;
+        let caixa_alta = row![text("Letras").size(13).color(c.texto), horizontal_space()]
+            .push(pilula(c, Jeito::Maiusculas.nome(), false, Msg::Transformar(Jeito::Maiusculas, false)))
+            .push(pilula(c, Jeito::Minusculas.nome(), false, Msg::Transformar(Jeito::Minusculas, false)))
+            .push(pilula(c, Jeito::Iniciais.nome(), false, Msg::Transformar(Jeito::Iniciais, false)))
+            .spacing(4)
+            .align(Align::Center)
+            .padding([4u16, 10]);
+        let mut lista = column![container(text("Transformar a seleção").size(13).font(Font::SEMIBOLD).color(c.texto)).padding([4u16, 10]), caixa_alta].spacing(2);
+        for j in [Jeito::Base64, Jeito::Url, Jeito::Html, Jeito::Escapes] {
+            lista = lista.push(row![text(j.nome()).size(13).color(c.texto), horizontal_space(), pilula(c, "Codificar", false, Msg::Transformar(j, false)), pilula(c, "Decodificar", false, Msg::Transformar(j, true))].spacing(4).align(Align::Center).padding([4u16, 10]));
+        }
+        let dica = text("Tudo no computador, sem mandar para um site. Ctrl+Z desfaz.").size(11).color(c.mudo);
+        let cartao = container(lista.push(container(dica).padding([4u16, 10]))).padding(10.0).width(340.0).style(flutuante(c, 12.0, 0.18, 6.0, 20.0));
+        stack![mouse_area(Space::new(Length::FILL, Length::FILL)).on_press(Msg::MenuSelecao), container(cartao).width(Length::FILL).height(Length::FILL).align_y(Align::End).padding(Padding { bottom: 36.0, left: 70.0, ..Padding::ZERO })].into()
+    }
+
     /// Propriedades do arquivo, num painel à direita (como o ⓘ do Editor de Texto do GNOME).
     fn propriedades(&self, c: Cores) -> Element<'_, Msg> {
         let aba = &self.abas[self.ativa];
@@ -1804,6 +1835,23 @@ impl App for Notas {
             }),
             Msg::MenuCod(m) => self.menu_cod = m,
             Msg::OutrasCod => self.outras_cod = !self.outras_cod,
+            Msg::MenuSelecao => self.menu_selecao = !self.menu_selecao,
+            Msg::Transformar(jeito, decodificar) => {
+                self.menu_selecao = false;
+                let c = self.conteudo();
+                let Some(sel) = c.selection().filter(|s| !s.is_empty()) else {
+                    self.aviso = Some("Selecione o texto que quer transformar".into());
+                    return Task::none();
+                };
+                match transformar::aplicar(&sel, jeito, decodificar) {
+                    Ok(novo) => {
+                        c.insert(&novo);
+                        self.foco += 1;
+                        return self.mudou();
+                    }
+                    Err(motivo) => self.aviso = Some(format!("Não decodificou: {motivo}")),
+                }
+            }
             Msg::Reabrir(cod) => {
                 self.menu_cod = None;
                 self.reabrir(Some(cod));
@@ -2098,7 +2146,7 @@ impl App for Notas {
             Msg::Esc => {
                 // Janela estreita: o painel por cima do editor também fecha com Esc.
                 let painel = self.compacta() && (self.propriedades || self.painel_postits);
-                if self.confirmar.take().is_none() && !std::mem::take(&mut self.menu) && self.menu_cod.take().is_none() && self.ir_para.take().is_none() && self.busca.take().is_none() && painel {
+                if self.confirmar.take().is_none() && !std::mem::take(&mut self.menu) && self.menu_cod.take().is_none() && !std::mem::take(&mut self.menu_selecao) && self.ir_para.take().is_none() && self.busca.take().is_none() && painel {
                     (self.propriedades, self.painel_postits) = (false, false);
                 }
                 self.foco += 1;
@@ -2386,6 +2434,9 @@ impl App for Notas {
         if self.menu {
             camadas = camadas.push(self.menu(c));
         }
+        if self.menu_selecao {
+            camadas = camadas.push(self.menu_selecao(c));
+        }
         if let Some(reabrir) = self.menu_cod {
             camadas = camadas.push(self.menu_codificacao(c, reabrir));
         }
@@ -2553,6 +2604,33 @@ mod testes {
         assert!(n.abas[n.ativa].caminho.is_none() && !n.abas[n.ativa].alterada(), "não salva o vazio por cima");
         assert!(n.aviso.as_deref().is_some_and(|a| a.contains("limite")), "{:?}", n.aviso);
         let _ = std::fs::remove_dir_all(&pasta);
+    }
+
+    /// A seleção é trocada por ela transformada (um Ctrl+Z volta); o que não decodifica só avisa.
+    #[test]
+    fn transforma_a_selecao() {
+        let mut n = Notas::novo();
+        n.prefs.configurado = true;
+        n.abas[n.ativa].conteudo = Some(Content::with_text("senha: c2VncmVkbw== fim"));
+        let tela = |n: &Notas| capture(&n.view(), Size::new(980.0, 420.0), 1.0, &n.theme(), &mut Renderer::new(), None);
+        tela(&n);
+        n.conteudo().find_next("c2VncmVkbw==", true);
+        let _ = n.update(Msg::MenuSelecao);
+        let png = tela(&n);
+        assert!(png.len() > 10_000, "o menu desenha");
+        if let Some(d) = std::env::var_os("FEATHERNOTES_CAPTURAR") {
+            std::fs::write(PathBuf::from(&d).join("selecao.png"), png).unwrap();
+        }
+        let _ = n.update(Msg::Transformar(transformar::Jeito::Base64, true));
+        assert_eq!((n.conteudo().text().as_str(), n.menu_selecao), ("senha: segredo fim", false));
+        n.conteudo().undo();
+        assert_eq!(n.conteudo().text(), "senha: c2VncmVkbw== fim");
+        n.conteudo().find_next("senha", true);
+        let _ = n.update(Msg::Transformar(transformar::Jeito::Base64, true));
+        assert_eq!(n.conteudo().text(), "senha: c2VncmVkbw== fim");
+        assert!(n.aviso.as_deref().is_some_and(|a| a.starts_with("Não decodificou")), "{:?}", n.aviso);
+        let _ = n.update(Msg::Transformar(transformar::Jeito::Maiusculas, false));
+        assert_eq!(n.conteudo().text(), "SENHA: c2VncmVkbw== fim");
     }
 
     /// Link que não é da web nem e-mail não abre: só avisa.

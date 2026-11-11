@@ -7,6 +7,7 @@ Lightweight notepad from the FeatherWorks suite, written in Rust with [pelicano]
 - Markdown with hidden markup, formatting bar and clickable tasks
 - 30+ encodings, automatic detection and repair of broken accents
 - Show invisible characters
+- Selection word count, and transform the selection: upper/lower case, Base64, URL, HTML and `\n` escapes (all local)
 - Sticky notes on the desktop: colors, pin to the background, list with trash
 - System shortcut for a new sticky note (Super+Alt+N on GNOME) and start with the system
 
