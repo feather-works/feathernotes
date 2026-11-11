@@ -122,3 +122,35 @@ Todos corrigidos; 27 testes passam (`cargo test`).
 12. ✅ **Ctrl+Tab não guardava a aba ativa na sessão.**
 
 Não verificado: a atualização com o app aberto num Windows de verdade (o build do Windows só foi checado com `cargo check`).
+
+# Auditoria do FeatherNotes 0.1.15 (2026-11-11)
+
+Carga assumida: uma pessoa num desktop, uma cópia do app. Os 30 testes passavam antes.
+
+## Precisa corrigir
+
+1. ✅ **Salvar um link simbólico trocava o link por um arquivo comum** (`src/arquivo.rs`, `gravar`):
+   o `~/.bashrc` que aponta para um repositório de dotfiles virava uma cópia solta, e o arquivo do
+   repositório ficava velho. Agora grava no arquivo para onde o link aponta (o link continua).
+2. ✅ **Arquivo enorme derrubava o app** (`src/main.rs`, `carregar`/`reabrir`): um log de alguns GB
+   era lido inteiro, e o texto ocupa várias vezes isso na memória. Agora acima de 512 MB não abre,
+   com aviso; a aba fica sem o caminho para o Salvar não gravar o vazio por cima do arquivo.
+
+## Deveria corrigir
+
+3. ✅ **Os testes dividiam a mesma pasta de dados**: rodando juntos, um teste podia regravar a
+   lista de post-its no meio de outro e fazer ele falhar ao acaso. Agora cada thread de teste tem a sua.
+4. ✅ **O temporário `.nome.feathernotes` ficava para trás** quando a gravação falhava (disco cheio,
+   troca recusada). Agora é apagado.
+5. ✅ **A senha da porta ficava legível por outros usuários por um instante** na primeira vez
+   (`src/instancia.rs`): o arquivo agora nasce só do dono, antes de a senha ser escrita.
+6. ⏳ A cópia de recuperação continua sendo gravada na thread da tela (item 11 da primeira auditoria).
+
+## Bom ter
+
+7. ✅ **No tema automático, cada passo de zoom rodava o `gsettings`**: agora só ao escolher o tema.
+8. ✅ **Mexer num post-it apagava o recado da janela principal** ("Não salvou…").
+9. ✅ **Arquivo que cresceu além do limite enquanto aberto** era relido a cada 2 s sem sucesso: agora
+   o aviso fica e o rodapé oferece recarregar.
+
+Não verificado: o snap (o atalho do GNOME e o "abrir ao iniciar" dentro do confinamento), o Windows.

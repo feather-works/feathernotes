@@ -447,7 +447,7 @@ impl Notas {
         self.esquecer_contagens();
         let aba = &mut self.abas[i];
         let copia = arquivo::recuperacao(aba.id);
-        let original = aba.caminho.as_ref().map(std::fs::read);
+        let original = aba.caminho.as_deref().map(ler_arquivo);
         (aba.modificado, aba.mudou_fora) = (aba.caminho.as_deref().and_then(modificado_em), false);
         let (texto, salvo) = if let Ok(bytes) = std::fs::read(&copia) {
             // A cópia é sempre UTF-8; a codificação para salvar vem do arquivo original.
@@ -469,6 +469,10 @@ impl Notas {
                 }
                 Some(Err(e)) => {
                     self.aviso = Some(format!("Não abriu {}: {e}", aba.caminho.as_ref().expect("tem caminho").display()));
+                    // Grande demais: a aba fica sem o arquivo, para o Salvar não gravar o vazio por cima dele.
+                    if e.kind() == std::io::ErrorKind::FileTooLarge {
+                        aba.caminho = None;
+                    }
                     // Não alterada: o vazio não vai para a recuperação nem por cima do arquivo, e a próxima vez tenta de novo.
                     (String::new(), Some(0))
                 }
@@ -751,6 +755,11 @@ impl Notas {
     /// Depois de uma edição: a cópia de recuperação sai em 2 s (uma só para várias teclas).
     fn mudou(&mut self) -> Task<Msg> {
         self.aviso = None;
+        self.agendar_copia()
+    }
+
+    /// A cópia em 2 s sem apagar o recado do rodapé (mexer num post-it não esconde o "Não salvou…").
+    fn agendar_copia(&mut self) -> Task<Msg> {
         if self.copia_agendada {
             return Task::none();
         }
@@ -851,7 +860,7 @@ impl Notas {
             self.aviso = Some("Salve ou descarte as alterações antes de reabrir com outra codificação".into());
             return;
         }
-        match std::fs::read(&p) {
+        match ler_arquivo(&p) {
             Ok(bytes) => {
                 let cod = cod.unwrap_or_else(|| codificacao::detectar(&bytes));
                 let (texto, ruim) = cod.ler(&bytes);
@@ -885,13 +894,18 @@ impl Notas {
         }
         let (linha, cod) = (c.cursor().0, aba.cod);
         self.reabrir(Some(cod));
+        // Não releu (cresceu demais, sem permissão): o aviso de erro fica e o rodapé oferece recarregar.
+        let aba = &mut self.abas[self.ativa];
+        if aba.modificado != agora {
+            aba.mudou_fora = true;
+            return;
+        }
         self.conteudo().go_to_line(linha);
         self.aviso = Some("Recarregado: o arquivo mudou no disco".into());
     }
 
     fn mudar_prefs(&mut self, f: impl FnOnce(&mut Preferencias)) {
         f(&mut self.prefs);
-        self.escuro = escuro(self.prefs.tema);
         arquivo::gravar_preferencias(&self.prefs);
     }
 }
@@ -916,6 +930,19 @@ fn lembrar<T: Clone>(cache: &Lembrado<T>, chave: (u64, u64), calcular: impl FnOn
 fn abrir_no_sistema(alvo: impl AsRef<std::ffi::OsStr>) -> std::io::Result<std::process::Child> {
     let programa = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     std::process::Command::new(programa).arg(alvo).spawn()
+}
+
+/// Acima disto o arquivo não abre: o texto ocupa várias vezes o tamanho na memória, e um log de
+/// alguns GB derrubaria o app (com os post-its e o que não foi copiado para a recuperação).
+const MAIOR_ARQUIVO: u64 = 512 << 20;
+
+/// Os bytes do arquivo; erro `FileTooLarge` acima de `MAIOR_ARQUIVO`.
+fn ler_arquivo(p: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let tamanho = std::fs::metadata(p)?.len();
+    if tamanho > MAIOR_ARQUIVO {
+        return Err(std::io::Error::new(std::io::ErrorKind::FileTooLarge, format!("tem {} MB, e o limite é {} MB", tamanho >> 20, MAIOR_ARQUIVO >> 20)));
+    }
+    std::fs::read(p)
 }
 
 /// A data de modificação do arquivo; `None` se não existe ou não deu para ler.
@@ -2019,7 +2046,11 @@ impl App for Notas {
             Msg::FecharMenu => self.menu = false,
             Msg::Fonte(d) => self.mudar_prefs(|p| p.tamanho = if d == 0.0 { TAMANHO_PADRAO } else { (p.tamanho + d).clamp(8.0, 48.0) }),
             Msg::Quebra => self.mudar_prefs(|p| p.quebra = !p.quebra),
-            Msg::Tema(t) => self.mudar_prefs(|p| p.tema = t),
+            Msg::Tema(t) => {
+                self.mudar_prefs(|p| p.tema = t);
+                // Só aqui: no automático, perguntar ao sistema custa um processo (gsettings), e o zoom com Ctrl+roda passa por `mudar_prefs` a cada passo.
+                self.escuro = escuro(t);
+            }
             Msg::Localizar => {
                 self.menu = false;
                 if self.busca.is_none() {
@@ -2135,7 +2166,7 @@ impl App for Notas {
                 self.guardar_postits();
                 return t;
             }
-            Msg::PostItMudou => return self.mudou(),
+            Msg::PostItMudou => return self.agendar_copia(),
             Msg::PostItCor(id) => {
                 if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
                     p.cor = (p.cor + 1) % CORES_POSTIT.len();
@@ -2172,7 +2203,7 @@ impl App for Notas {
                 if let Some(p) = self.postits.iter_mut().find(|p| p.id == id) {
                     p.posicao = Some(ponto);
                 }
-                return self.mudou();
+                return self.agendar_copia();
             }
             Msg::PainelPostIts => {
                 self.menu = false;
@@ -2515,6 +2546,12 @@ mod testes {
         assert!(!n.abas[n.ativa].mudou_fora);
         let _ = n.update(Msg::Abertos(vec![pasta.join("nao-existe.txt")]));
         assert!(!n.abas[n.ativa].alterada() && n.conteudo().text().is_empty());
+        // Grande demais (arquivo esparso, não ocupa o disco): não lê, e a aba vazia fica sem o caminho.
+        let grande = pasta.join("grande.log");
+        std::fs::File::create(&grande).unwrap().set_len(MAIOR_ARQUIVO + 1).unwrap();
+        let _ = n.update(Msg::Abertos(vec![grande]));
+        assert!(n.abas[n.ativa].caminho.is_none() && !n.abas[n.ativa].alterada(), "não salva o vazio por cima");
+        assert!(n.aviso.as_deref().is_some_and(|a| a.contains("limite")), "{:?}", n.aviso);
         let _ = std::fs::remove_dir_all(&pasta);
     }
 

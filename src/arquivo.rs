@@ -3,25 +3,35 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Grava num temporário ao lado e troca: queda de energia no meio não corta o arquivo.
-// shortcut: o rename troca um link simbólico pelo arquivo; gravar por cima quando alguém precisar.
 pub fn gravar(p: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Um link simbólico (o ~/.bashrc que aponta para o repositório de dotfiles) continua link:
+    // grava no arquivo para onde ele aponta.
+    let real = std::fs::canonicalize(p).ok();
+    let p = real.as_deref().unwrap_or(p);
     let nome = p.file_name().ok_or_else(|| io::Error::other("caminho sem nome de arquivo"))?;
     let tmp = p.with_file_name(format!(".{}.feathernotes", nome.to_string_lossy()));
-    let mut f = std::fs::File::create(&tmp)?;
-    // As permissões do arquivo que vai ser trocado: um script continua executável.
-    if let Ok(m) = std::fs::metadata(p) {
-        f.set_permissions(m.permissions())?;
-    }
-    io::Write::write_all(&mut f, bytes)?;
-    // Para o disco antes de trocar: sem isso, no XFS a queda pode deixar o arquivo vazio.
-    f.sync_all()?;
-    std::fs::rename(&tmp, p)
+    let trocar = || {
+        let mut f = std::fs::File::create(&tmp)?;
+        // As permissões do arquivo que vai ser trocado: um script continua executável.
+        if let Ok(m) = std::fs::metadata(p) {
+            f.set_permissions(m.permissions())?;
+        }
+        io::Write::write_all(&mut f, bytes)?;
+        // Para o disco antes de trocar: sem isso, no XFS a queda pode deixar o arquivo vazio.
+        f.sync_all()?;
+        std::fs::rename(&tmp, p)
+    };
+    // Disco cheio ou troca recusada: o temporário pela metade não fica para trás.
+    trocar().inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 fn pasta_dados() -> PathBuf {
-    // Os testes nunca mexem na sessão e nos post-its de quem roda.
+    // Os testes nunca mexem na sessão e nos post-its de quem roda, nem nos de outro teste rodando junto.
     if cfg!(test) {
-        return std::env::temp_dir().join(format!("feathernotes-teste-{}", std::process::id()));
+        let teste = format!("{:?}", std::thread::current().id()).replace(|c: char| !c.is_ascii_alphanumeric(), "");
+        return std::env::temp_dir().join(format!("feathernotes-teste-{}-{teste}", std::process::id()));
     }
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("feathernotes")
 }
@@ -381,6 +391,25 @@ mod testes {
         std::fs::write(pasta_postits().join("lista"), "503\t1\t1\t0\t0\t10\t20\tl1800000000\n504\t1\t1\t0\t0\tl5\n").unwrap();
         let lidos: Vec<_> = ler_postits().iter().map(|(p, _)| (p.id, p.posicao)).collect();
         assert_eq!(lidos, vec![(503, ponto), (504, None)]);
+    }
+
+    /// Salvar por um link simbólico grava no arquivo de verdade e o link continua link; o
+    /// temporário não fica para trás quando a troca falha.
+    #[cfg(unix)]
+    #[test]
+    fn gravar_pelo_link_e_sem_sobra() {
+        let pasta = pasta_dados().join("links");
+        std::fs::create_dir_all(pasta.join("pasta")).unwrap();
+        let (alvo, link) = (pasta.join("alvo.txt"), pasta.join("link.txt"));
+        std::fs::write(&alvo, "velho").unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&alvo, &link).unwrap();
+        gravar(&link, b"novo").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&alvo).unwrap(), "novo");
+        // Trocar uma pasta por um arquivo falha: nada de ".pasta.feathernotes" sobrando.
+        assert!(gravar(&pasta.join("pasta"), b"x").is_err());
+        assert!(!pasta.join(".pasta.feathernotes").exists());
     }
 
     /// Ida e volta da sessão: o que foi gravado volta, e a cópia de uma aba da sessão não é apagada.

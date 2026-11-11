@@ -53,6 +53,10 @@ pub fn iniciar(pedido: &str) -> Inicio {
     let senha = nova_senha();
     let gravou = l.local_addr().ok().is_some_and(|a| {
         let _ = std::fs::create_dir_all(arquivo.parent().expect("tem pasta"));
+        // Na primeira vez o arquivo nasce só do dono: o `gravar` copia a permissão dele para o
+        // temporário antes de escrever a senha (senão ela ficaria legível por um instante).
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::OpenOptionsExt::mode(std::fs::OpenOptions::new().append(true).create(true), 0o600).open(&arquivo);
         crate::arquivo::gravar(&arquivo, format!("{} {senha}", a.port()).as_bytes()).is_ok() && so_do_dono(&arquivo)
     });
     Inicio::Primeiro(gravou.then_some((l, senha)))
