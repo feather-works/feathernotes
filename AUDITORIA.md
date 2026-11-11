@@ -154,3 +154,11 @@ Carga assumida: uma pessoa num desktop, uma cópia do app. Os 30 testes passavam
    o aviso fica e o rodapé oferece recarregar.
 
 Não verificado: o snap (o atalho do GNOME e o "abrir ao iniciar" dentro do confinamento), o Windows.
+
+## Segunda passada (depois da contagem e do "Transformar a seleção")
+
+1. ✅ **A contagem da seleção era refeita a cada quadro**: com Ctrl+A num log de centenas de MB,
+   cada quadro percorria o texto inteiro. Agora fica guardada pela (aba, versão, tamanho, cursor).
+2. ⏳ **O rodapé copia a seleção a cada quadro** (`Content::selection`, já era assim): com Ctrl+A num
+   arquivo enorme ainda custa uma cópia por quadro. Precisa de um `selection_len`/intervalo no pelicano.
+3. ⏳ Os testes deixam uma pasta por thread em `/tmp` (`feathernotes-teste-<pid>-<thread>`), pequenas.

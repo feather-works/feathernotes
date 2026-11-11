@@ -261,6 +261,8 @@ struct Notas {
     estatisticas: Lembrado<[usize; 4]>,
     /// ((aba, versão), o erro do JSON ou `None` se válido), só com a barra do JSON.
     erro_json: Lembrado<Option<json::Erro>>,
+    /// (palavras, caracteres) da seleção pela chave ((aba, versão), tamanho, cursor): um Ctrl+A num log grande não é recontado a cada quadro.
+    contagem_selecao: Lembrado<(usize, usize), ((u64, u64), usize, (usize, usize))>,
     postits: Vec<PostIt>,
     /// A lista de post-its à direita (no lugar das propriedades).
     painel_postits: bool,
@@ -439,7 +441,7 @@ impl Notas {
         }
         let escuro = escuro(prefs.tema);
         let atalho_windows = prefs.atalho;
-        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, menu_selecao: false, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: if cfg!(windows) { atalho_windows } else { cfg!(target_os = "linux") && arquivo::tem_atalho_postit() }, fechadas: Vec::new() };
+        let mut n = Notas { ativa: ativa.min(abas.len() - 1), abas, proximo_id: proximo_id + 1, prefs, escuro, menu: false, busca: None, confirmar: None, aviso: None, copia_agendada: false, largura: TAMANHO_JANELA.width, altura: TAMANHO_JANELA.height, menu_cod: None, menu_selecao: false, outras_cod: false, recursos: String::new(), cpu_antes: None, zoom: Default::default(), propriedades: false, estatisticas: Default::default(), erro_json: Default::default(), contagem_selecao: Default::default(), ir_para: None, foco: 0, ocultos: Default::default(), suspeitas: Default::default(), postits: Vec::new(), painel_postits: false, inicio_sistema: arquivo::inicia_com_sistema(), atalho_postit: if cfg!(windows) { atalho_windows } else { cfg!(target_os = "linux") && arquivo::tem_atalho_postit() }, fechadas: Vec::new() };
         n.postits = arquivo::ler_postits().into_iter().map(|(PostItSalvo { id, cor, aberto, fixo, posicao, excluido }, texto)| PostIt { id, conteudo: Content::with_text(&texto), cor: cor % CORES_POSTIT.len(), aberto: aberto && !excluido, fixo, posicao, excluido, confirmar: false, gravado: 0 }).collect();
         n.carregar(n.ativa);
         n
@@ -518,6 +520,7 @@ impl Notas {
         self.ocultos.take();
         self.erro_json.take();
         self.suspeitas.take();
+        self.contagem_selecao.take();
     }
 
     /// As palavras suspeitas sem repetir, na ordem do texto.
@@ -917,10 +920,10 @@ impl Notas {
 }
 
 /// Uma contagem guardada com a chave (aba, versão do texto).
-type Lembrado<T> = std::cell::RefCell<Option<((u64, u64), T)>>;
+type Lembrado<T, K = (u64, u64)> = std::cell::RefCell<Option<(K, T)>>;
 
 /// O valor guardado para a `chave` (aba, versão); calcula de novo só quando o texto muda.
-fn lembrar<T: Clone>(cache: &Lembrado<T>, chave: (u64, u64), calcular: impl FnOnce() -> T) -> T {
+fn lembrar<T: Clone, K: PartialEq>(cache: &Lembrado<T, K>, chave: K, calcular: impl FnOnce() -> T) -> T {
     let mut cache = cache.borrow_mut();
     match &*cache {
         Some((k, v)) if *k == chave => v.clone(),
@@ -1486,7 +1489,7 @@ impl Notas {
         let sob_cursor = sob_cursor.or_else(|| suspeitas.into_iter().find(|s| selecao.as_deref() == Some(&s.palavra)).map(|s| item(s.resumo)));
         // Com texto selecionado: quanto ele tem, e o clique abre o "Transformar a seleção".
         let contagem = selecao.as_deref().filter(|s| !s.is_empty()).map(|s| {
-            let (p, c) = (s.split_whitespace().count(), s.chars().filter(|&c| c != '\n' && c != '\r').count());
+            let (p, c) = lembrar(&self.contagem_selecao, (self.chave(), s.len(), (ln, col)), || (s.split_whitespace().count(), s.chars().filter(|&c| c != '\n' && c != '\r').count()));
             clicavel(format!("{p} {}, {c} {} selecionados", if p == 1 { "palavra" } else { "palavras" }, if c == 1 { "caractere" } else { "caracteres" }), Msg::MenuSelecao)
         });
         let linha = row![clicavel(format!("Ln {ln}, Col {col}"), Msg::IrPara)]
@@ -2618,6 +2621,7 @@ mod testes {
         let _ = n.update(Msg::MenuSelecao);
         let png = tela(&n);
         assert!(png.len() > 10_000, "o menu desenha");
+        assert_eq!(n.contagem_selecao.borrow().as_ref().map(|c| c.1), Some((1, 12)), "a contagem do rodapé fica guardada");
         if let Some(d) = std::env::var_os("FEATHERNOTES_CAPTURAR") {
             std::fs::write(PathBuf::from(&d).join("selecao.png"), png).unwrap();
         }
