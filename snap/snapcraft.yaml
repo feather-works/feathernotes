@@ -1,7 +1,7 @@
 name: feather-notes # "feathernotes" já estava reservado por outra pessoa na loja
 title: FeatherNotes
 base: core26 # mesma base e mesma placa de vídeo (gpu-2604) do snap do FeatherSheet
-version: '0.1.15' # trocar junto com a tag em `source:` a cada versão
+version: '0.1.16' # trocar junto com a tag em `source:` a cada versão
 summary: Light notepad with Markdown and desktop sticky notes
 description: |
   A notepad written in Rust with a native interface. Tabs that come back
@@ -55,7 +55,7 @@ parts:
   feather-notes:
     # Reaproveita o .deb da release (feito pelo pacote/gerar.sh), sem recompilar.
     plugin: dump
-    source: https://github.com/feather-works/feathernotes/releases/download/v0.1.15/feathernotes-linux-amd64.deb
+    source: https://github.com/feather-works/feathernotes/releases/download/v0.1.16/feathernotes-linux-amd64.deb
     source-type: deb
     # Bibliotecas que o winit/wgpu e as fontes abrem por dlopen.
     stage-packages:
