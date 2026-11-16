@@ -75,6 +75,8 @@ Estado: ✅ corrigido · ⏳ pendente
 11. ⏳ **A cópia de recuperação grava o texto inteiro na thread da tela a cada 2 s** (`src/main.rs`)
     - Para notas normais, tudo bem. Com um log de 50 MB aberto, a digitação engasga.
     - Conserto, só se alguém reclamar: gravar numa thread.
+    - Medido em 16/11/2026 (log de 50 MB, build release): 50 ms por cópia (30 ms copiando o texto, que fica na
+      thread da tela, e 20 ms gravando). Sai na pausa da digitação, não entre teclas: continua como está.
 
 ## O travamento ao redimensionar
 

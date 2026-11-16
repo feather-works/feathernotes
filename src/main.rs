@@ -505,6 +505,15 @@ impl Notas {
     /// As palavras da aba com letras disfarçadas (link falso), procuradas só quando o texto muda.
     fn suspeitas(&self) -> Vec<alfabeto::Suspeita> {
         let conteudo = self.conteudo();
+        // Texto grande (log): varrer a cada tecla custa ~37 ms em 50 MB. Enquanto digita, fica a lista
+        // anterior da aba; a nova sai na pausa de 2 s (quando a cópia de recuperação é gravada).
+        if self.copia_agendada && conteudo.line_count() > 100_000 {
+            if let Some(((id, _), v)) = &*self.suspeitas.borrow() {
+                if *id == self.abas[self.ativa].id {
+                    return v.clone();
+                }
+            }
+        }
         // Só ASCII e acentos do latim: não há o que procurar, nem copia o texto.
         lembrar(&self.suspeitas, self.chave(), || if conteudo.count_chars(alfabeto::vale_procurar) > 0 { alfabeto::procurar(&conteudo.text()) } else { Vec::new() })
     }
@@ -2645,6 +2654,19 @@ mod testes {
         assert_eq!(n.aviso.as_deref(), Some("Não abre este tipo de link: file:///etc/passwd"));
     }
 
+    /// Texto grande: digitando, a procura de letras disfarçadas espera a pausa de 2 s.
+    #[test]
+    fn suspeitas_em_texto_grande_esperam_a_pausa() {
+        let mut n = Notas::novo();
+        n.abas[n.ativa].conteudo = Some(Content::with_text(&"linha\n".repeat(100_001)));
+        assert!(n.suspeitas().is_empty());
+        n.conteudo().insert("pаypal ");
+        let _ = n.mudou();
+        assert!(n.suspeitas().is_empty(), "enquanto digita, fica a lista anterior");
+        let _ = n.update(Msg::Copiar);
+        assert_eq!(Notas::palavras_suspeitas(&n.suspeitas()), vec!["pаypal"]);
+    }
+
     /// O rodapé conta as palavras de link falso, e o clique passa de uma para a outra.
     #[test]
     fn palavras_suspeitas_no_rodape() {
@@ -2795,3 +2817,4 @@ mod testes {
         foto(&n, "6-json.png");
     }
 }
+
