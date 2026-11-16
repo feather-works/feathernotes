@@ -78,6 +78,24 @@ Estado: ✅ corrigido · ⏳ pendente
     - Medido em 16/11/2026 (log de 50 MB, build release): 50 ms por cópia (30 ms copiando o texto, que fica na
       thread da tela, e 20 ms gravando). Sai na pausa da digitação, não entre teclas: continua como está.
 
+12. ✅ **Tempos das tarefas comuns num log grande (#4)** (`medir_tempos`, `cargo test --release medir_tempos -- --ignored --nocapture`)
+    - Medido em 16/11/2026, log de 48 MB (600 mil linhas), build release, quadro de 1280×800:
+
+      | Tarefa | Antes | Depois | De quem é o resto |
+      |---|---|---|---|
+      | Abrir | 146 ms | 75 ms | cópia para o pelicano (28 ms) |
+      | Primeiro quadro | 205 ms | 205 ms | pelicano |
+      | Quadro parado / tecla | 25–29 ms | 25–29 ms | pelicano (9 ms numa nota de 0,2 MB) |
+      | Buscar (perto do fim / sem achar) | 175 ms | 175–195 ms | pelicano |
+      | Substituir tudo (600 mil) | 580 ms | 540 ms | pelicano |
+      | Cópia de recuperação / Salvar | 55 / 89 ms | igual | `text()` do pelicano + disco; fora das teclas |
+      | Propriedades (1ª vez) | 215 ms | 150 ms | `text()` (27 ms) + contagem (55 ms) |
+      | Ctrl+A (1º quadro / seguintes) | 134 / 66 ms | 120 / 58 ms | pelicano: `selection()` copia a seleção inteira a cada quadro |
+      | Trocar para a aba grande | 57 ms | 60 ms | procura de letras disfarçadas (11 ms) + quadro |
+
+    - Conserto: abrir UTF-8 usa os bytes lidos sem copiar; `consertar_acentos` sai numa passada quando não há Ã nem â;
+      palavras e caracteres contados numa passada só (`contar`).
+
 ## O travamento ao redimensionar
 
 ✅ Resolvido. Medido numa RX 7600, arrastando a borda da janela:

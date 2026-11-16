@@ -464,12 +464,13 @@ impl Notas {
                 (None, Some(Ok(b))) => codificacao::detectar(b),
                 _ => Cod::Utf8,
             };
-            (String::from_utf8_lossy(&bytes).into_owned(), None)
+            (String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()), None)
         } else {
             match original {
                 Some(Ok(bytes)) => {
                     aba.cod = codificacao::detectar(&bytes);
-                    let (texto, ruim) = aba.cod.ler(&bytes);
+                    // UTF-8 sem BOM (o comum): o texto fica com os bytes lidos, sem copiar 50 MB de um log.
+                    let (texto, ruim) = if aba.cod == Cod::Utf8 { (String::from_utf8(bytes).expect("detectar conferiu o UTF-8"), false) } else { aba.cod.ler(&bytes) };
                     if ruim {
                         self.aviso = Some(format!("Alguns bytes não fazem sentido em {}: viraram �", aba.cod.nome()));
                     }
@@ -955,6 +956,20 @@ fn abrir_no_sistema(alvo: impl AsRef<std::ffi::OsStr>) -> std::io::Result<std::p
 const MAIOR_ARQUIVO: u64 = 512 << 20;
 
 /// Os bytes do arquivo; erro `FileTooLarge` acima de `MAIOR_ARQUIVO`.
+/// [palavras, caracteres sem espaço, caracteres sem as quebras de linha], numa passada só
+/// (eram três: num log de 50 MB, 130 ms viraram 55).
+fn contar(t: &str) -> [usize; 3] {
+    let (mut palavras, mut sem_espaco, mut todos, mut dentro) = (0, 0, 0, false);
+    for c in t.chars() {
+        let espaco = c.is_whitespace();
+        palavras += usize::from(!espaco && !dentro);
+        sem_espaco += usize::from(!espaco);
+        todos += usize::from(c != '\n' && c != '\r');
+        dentro = !espaco;
+    }
+    [palavras, sem_espaco, todos]
+}
+
 fn ler_arquivo(p: &std::path::Path) -> std::io::Result<Vec<u8>> {
     let tamanho = std::fs::metadata(p)?.len();
     if tamanho > MAIOR_ARQUIVO {
@@ -1498,7 +1513,10 @@ impl Notas {
         let sob_cursor = sob_cursor.or_else(|| suspeitas.into_iter().find(|s| selecao.as_deref() == Some(&s.palavra)).map(|s| item(s.resumo)));
         // Com texto selecionado: quanto ele tem, e o clique abre o "Transformar a seleção".
         let contagem = selecao.as_deref().filter(|s| !s.is_empty()).map(|s| {
-            let (p, c) = lembrar(&self.contagem_selecao, (self.chave(), s.len(), (ln, col)), || (s.split_whitespace().count(), s.chars().filter(|&c| c != '\n' && c != '\r').count()));
+            let (p, c) = lembrar(&self.contagem_selecao, (self.chave(), s.len(), (ln, col)), || {
+                let [p, _, c] = contar(s);
+                (p, c)
+            });
             clicavel(format!("{p} {}, {c} {} selecionados", if p == 1 { "palavra" } else { "palavras" }, if c == 1 { "caractere" } else { "caracteres" }), Msg::MenuSelecao)
         });
         let linha = row![clicavel(format!("Ln {ln}, Col {col}"), Msg::IrPara)]
@@ -1693,8 +1711,8 @@ impl Notas {
         let conteudo = self.conteudo();
         // Contar o texto inteiro só quando ele muda, não a cada quadro.
         let [linhas, palavras, sem_espaco, todos] = lembrar(&self.estatisticas, self.chave(), || {
-            let t = conteudo.text();
-            [conteudo.line_count(), t.split_whitespace().count(), t.chars().filter(|c| !c.is_whitespace()).count(), t.chars().filter(|&c| c != '\n' && c != '\r').count()]
+            let [palavras, sem_espaco, todos] = contar(&conteudo.text());
+            [conteudo.line_count(), palavras, sem_espaco, todos]
         });
         let campo = |titulo: &'static str, valor: String| column![text(titulo).size(11).color(c.mudo), text(valor).size(13).color(c.texto)].spacing(3).padding([10u16, 14]).width(Length::FILL);
         let linha = || container(Space::new(Length::FILL, 1.0)).style(caixa(c.borda, Border::default()));
@@ -2654,6 +2672,14 @@ mod testes {
         assert_eq!(n.aviso.as_deref(), Some("Não abre este tipo de link: file:///etc/passwd"));
     }
 
+    /// A contagem numa passada só bate com a das três passadas de antes.
+    #[test]
+    fn contar_bate_com_o_jeito_antigo() {
+        for t in ["", "  ", "a", " olá  mundo\r\n\tcom\u{a0}nbsp\n", "x\ny z\n\n"] {
+            assert_eq!(contar(t), [t.split_whitespace().count(), t.chars().filter(|c| !c.is_whitespace()).count(), t.chars().filter(|&c| c != '\n' && c != '\r').count()], "{t:?}");
+        }
+    }
+
     /// Texto grande: digitando, a procura de letras disfarçadas espera a pausa de 2 s.
     #[test]
     fn suspeitas_em_texto_grande_esperam_a_pausa() {
@@ -2816,5 +2842,53 @@ mod testes {
         n.ativa = 2;
         foto(&n, "6-json.png");
     }
+    /// Tempos das tarefas comuns num log grande: `cargo test --release medir_tempos -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn medir_tempos() {
+        let pasta = std::env::temp_dir().join(format!("feathernotes-medir-{}", std::process::id()));
+        std::fs::create_dir_all(&pasta).unwrap();
+        for (nome, linhas) in [("nota", 2_000usize), ("log", 600_000)] {
+            let arq = pasta.join(format!("{nome}.log"));
+            let texto: String = (0..linhas).map(|i| format!("2026-11-16 10:{:02}:{:02} INFO servico[{i}] pedido concluido em {} ms usuario=joao\n", i / 60 % 60, i % 60, i % 997)).collect();
+            std::fs::write(&arq, &texto).unwrap();
+            let mb = texto.len() as f64 / 1e6;
+            let t = |rotulo: &str, f: &mut dyn FnMut()| {
+                let i = std::time::Instant::now();
+                f();
+                println!("{nome} ({mb:.1} MB) {rotulo}: {:.1} ms", i.elapsed().as_secs_f64() * 1e3);
+            };
+            let mut n = Notas::novo();
+            n.prefs.configurado = true;
+            let mut r = Renderer::new();
+            let tam = Size::new(1280.0, 800.0);
+            t("abrir", &mut || { let _ = n.update(Msg::Abertos(vec![arq.clone()])); });
+            t("primeiro quadro", &mut || { capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+            t("quadro parado", &mut || { capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+            t("só view()", &mut || { let _ = n.view(); });
+            t("tecla + quadro", &mut || { n.conteudo().insert("x"); let _ = n.update(Msg::Mudou); capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+            t("tecla + view()", &mut || { n.conteudo().insert("x"); let _ = n.update(Msg::Mudou); let _ = n.view(); });
+            t("ir para o fim (Ctrl+End) + quadro", &mut || { n.conteudo().go_to_line(linhas); capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+            n.conteudo().go_to_line(1);
+            n.busca = Some(Busca { termo: "servico[".to_string() + &(linhas - 5).to_string(), troca: String::new(), maiusculas: false });
+            t("buscar perto do fim", &mut || { let _ = n.update(Msg::Proximo); });
+            n.busca = Some(Busca { termo: "naoexiste".into(), troca: String::new(), maiusculas: false });
+            t("buscar sem achar", &mut || { let _ = n.update(Msg::Proximo); });
+            n.busca = Some(Busca { termo: "joao".into(), troca: "maria".into(), maiusculas: false });
+            t("substituir tudo", &mut || { let _ = n.update(Msg::SubstituirTudo); });
+            n.busca = None;
+            t("cópia de recuperação", &mut || { let _ = n.update(Msg::Copiar); });
+            let id = n.abas[n.ativa].id;
+            t("salvar", &mut || { n.salvar(id, arq.clone()); });
+            t("propriedades (1ª vez) + quadro", &mut || { n.propriedades = true; capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+            n.propriedades = false;
+            t("Ctrl+A + quadro", &mut || { n.conteudo().select_all(); capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+            t("Ctrl+A, quadro seguinte", &mut || { capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+            n.conteudo().set_cursor(0, 0);
+            let _ = n.update(Msg::Nova);
+            t("trocar de aba (para a grande)", &mut || { let _ = n.update(Msg::Aba(n.abas.len() - 2)); capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+            t("trocar de aba (para a vazia)", &mut || { let _ = n.update(Msg::Aba(n.abas.len() - 1)); capture(&n.view(), tam, 1.0, &n.theme(), &mut r, None); });
+        }
+        let _ = std::fs::remove_dir_all(&pasta);
+    }
 }
-

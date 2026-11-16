@@ -207,6 +207,10 @@ pub fn detectar(bytes: &[u8]) -> Cod {
 
 /// "JoÃ£o": texto UTF-8 que já foi lido uma vez como Windows-1252 e gravado de novo. Devolve o conserto.
 pub fn consertar_acentos(texto: &str) -> Option<String> {
+    // Todos começam com Ã ou â: sem eles (quase sempre), uma passada rápida e pronto.
+    if !texto.contains('Ã') && !texto.contains('â') {
+        return None;
+    }
     let suspeito = ["Ã¡", "Ã¢", "Ã£", "Ã§", "Ã©", "Ãª", "Ã\u{ad}", "Ã³", "Ã´", "Ãµ", "Ãº", "Ã‰", "Ã“", "â€"].iter().any(|p| texto.contains(p));
     if !suspeito {
         return None;
