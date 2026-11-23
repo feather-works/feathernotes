@@ -1,5 +1,7 @@
 # FeatherNotes
 
+[![Discord](https://img.shields.io/badge/Discord-Maragon.Dev-5865F2?logo=discord&logoColor=white)](https://discord.gg/b4Epb4eSSH)
+
 Lightweight notepad from the FeatherWorks suite, written in Rust with [pelicano](https://github.com/feather-works/pelicano).
 
 - Tabs that come back as you left them, unsaved changes included
